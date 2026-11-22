@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Nate Stars — Telegram Stars & Premium</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="src/styles/main.css?v=11">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.ready();
+      window.Telegram.WebApp.expand();
+      try {
+        window.Telegram.WebApp.setHeaderColor('#090C15');
+        window.Telegram.WebApp.setBackgroundColor('#090C15');
+      } catch(e) {}
+    }
+  </script>
+</head>
+<body>
+  <!-- Ambient Deep Blue Lighting -->
+  <div class="luxury-aura-top"></div>
+  <div class="luxury-aura-bottom"></div>
+
+  <div id="app">
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="header-inner">
+        <div class="brand">
+          <div class="brand-badge">
+            <svg class="star-vector" width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M12 2L14.9 8.26L21.75 9.17L16.69 13.84L18.02 20.6L12 17.27L5.98 20.6L7.31 13.84L2.25 9.17L9.1 8.26L12 2Z" fill="url(#starGradHeader)"/>
+              <defs>
+                <linearGradient id="starGradHeader" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stop-color="#93c5fd"/>
+                  <stop offset="45%" stop-color="#3b82f6"/>
+                  <stop offset="100%" stop-color="#1d4ed8"/>
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <span class="brand-name">Nate Stars</span>
+            <span class="brand-tag">
+              <span class="live-dot"></span>
+              UZS • Uzcard / Humo
+            </span>
+          </div>
+        </div>
+
+        <div class="profile-chip" id="profileChip">
+          <div class="profile-avatar" id="userAvatar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+              <circle cx="12" cy="7" r="4"></circle>
+            </svg>
+          </div>
+          <span class="profile-name" id="userName">Клиент</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Recipient username section -->
+    <section class="recipient-section">
+      <div class="section-title-row">
+        <span class="field-label">Получатель</span>
+        <span class="field-sublabel">Куда доставить покупку</span>
+      </div>
+      <div class="input-card">
+        <div class="input-prefix">@</div>
+        <input 
+          type="text" 
+          id="recipientInput" 
+          class="recipient-text-input" 
+          placeholder="username" 
+          autocomplete="off" 
+          autocapitalize="off" 
+          spellcheck="false"
+        >
+        <div class="input-badge">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+          </svg>
+          Подарок
+        </div>
+      </div>
+    </section>
+
+    <!-- Segmented Navigation (Tabs) -->
+    <nav class="segmented-control" role="tablist">
+      <button class="segment-btn active" role="tab" data-tab="stars" onclick="switchTab('stars')">
+        <svg class="tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+        </svg>
+        <span>Звёзды</span>
+      </button>
+
+      <button class="segment-btn" role="tab" data-tab="premium" onclick="switchTab('premium')">
+        <svg class="tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 3h12l4 6-10 12L2 9l4-6z"></path>
+          <path d="M11 3L8 9l4 12 4-12-3-6"></path>
+          <path d="M2 9h20"></path>
+        </svg>
+        <span>Premium</span>
+      </button>
+
+      <button class="segment-btn" role="tab" data-tab="orders" onclick="switchTab('orders')">
+        <svg class="tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        <span>Заказы</span>
+      </button>
+
+      <button class="segment-btn" id="adminTabBtn" role="tab" data-tab="admin" onclick="switchTab('admin')" style="display: none;">
+        <svg class="tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>Управление</span>
+      </button>
+    </nav>
+
+    <!-- Main Content Panels -->
+    <main class="panels-container">
+      <!-- PANEL 1: STARS -->
+      <section class="tab-panel active" id="tab-stars">
+        <div class="glass-card main-calc-card">
+          <div class="card-head">
+            <span class="card-title">Количество звёзд</span>
+            <div class="rate-pill" id="rateBadge">1 ★ = 220 сум</div>
+          </div>
+
+          <!-- Counter display -->
+          <div class="counter-container">
+            <button class="step-btn" onclick="adjustStars(-50)" aria-label="Меньше">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+
+            <div class="amount-field">
+              <input 
+                type="number" 
+                id="starsAmountInput" 
+                class="amount-input" 
+                value="100" 
+                min="50" 
+                step="50" 
+                oninput="onStarsInputChange()"
+              >
+              <span class="currency-symbol">★</span>
+            </div>
+
+            <button class="step-btn" onclick="adjustStars(50)" aria-label="Больше">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Preset Chips -->
+          <div class="presets-row">
+            <button class="preset-pill" onclick="setStars(50)">50</button>
+            <button class="preset-pill active" onclick="setStars(100)">100</button>
+            <button class="preset-pill" onclick="setStars(250)">250</button>
+            <button class="preset-pill featured" onclick="setStars(500)">
+              500
+              <span class="pill-dot"></span>
+            </button>
+            <button class="preset-pill" onclick="setStars(1000)">1 000</button>
+            <button class="preset-pill" onclick="setStars(2500)">2 500</button>
+            <button class="preset-pill" onclick="setStars(5000)">5 000</button>
+          </div>
+
+          <!-- Total summary -->
+          <div class="cost-summary">
+            <div class="cost-line">
+              <span class="cost-label">Итого к оплате</span>
+              <span class="cost-value" id="starsPriceText">22 000 сум</span>
+            </div>
+            <div class="benefit-badge">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline>
+                <polyline points="17 6 23 6 23 12"></polyline>
+              </svg>
+              <span>Выгода ~35% относительно официального App Store</span>
+            </div>
+          </div>
+
+          <button class="cta-primary-btn" onclick="openStarsCheckout()">
+            <span>Оформить заказ</span>
+            <svg class="cta-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Trust / Benefits Cards -->
+        <div class="benefits-grid">
+          <div class="benefit-item">
+            <div class="benefit-icon-box">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              </svg>
+            </div>
+            <div class="benefit-texts">
+              <span class="benefit-heading">Мгновенный перевод</span>
+              <span class="benefit-desc">Отправка подарком сразу после подтверждения</span>
+            </div>
+          </div>
+
+          <div class="benefit-item">
+            <div class="benefit-icon-box">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+            </div>
+            <div class="benefit-texts">
+              <span class="benefit-heading">Безопасная доставка</span>
+              <span class="benefit-desc">Без передачи паролей и кодов доступа</span>
+            </div>
+          </div>
+
+          <div class="benefit-item">
+            <div class="benefit-icon-box">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect>
+                <line x1="1" y1="10" x2="23" y2="10"></line>
+              </svg>
+            </div>
+            <div class="benefit-texts">
+              <span class="benefit-heading">Uzcard & Humo</span>
+              <span class="benefit-desc">Оплата через Payme, Click или Uzum Bank</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 2: PREMIUM -->
+      <section class="tab-panel" id="tab-premium">
+        <div class="premium-lead">
+          <h2 class="panel-headline">Telegram Premium</h2>
+          <p class="panel-subtitle">Официальная подписка с отправкой подарком на любой аккаунт</p>
+        </div>
+
+        <div class="premium-tiers-list">
+          <!-- 3 Months -->
+          <div class="tier-card" onclick="openPremiumCheckout(3)">
+            <div class="tier-left">
+              <div class="tier-duration">3 месяца</div>
+              <div class="tier-per-month" id="prem3PerMonth">~58 300 сум / мес</div>
+            </div>
+            <div class="tier-right">
+              <span class="tier-total" id="prem3Price">175 000 сум</span>
+              <span class="tier-action-pill">Выбрать</span>
+            </div>
+          </div>
+
+          <!-- 6 Months (Popular) -->
+          <div class="tier-card popular" onclick="openPremiumCheckout(6)">
+            <div class="tier-tag">ПОПУЛЯРНЫЙ</div>
+            <div class="tier-left">
+              <div class="tier-duration">6 месяцев</div>
+              <div class="tier-per-month" id="prem6PerMonth">~40 800 сум / мес</div>
+            </div>
+            <div class="tier-right">
+              <span class="tier-total" id="prem6Price">245 000 сум</span>
+              <span class="tier-action-pill">Выбрать</span>
+            </div>
+          </div>
+
+          <!-- 12 Months (Best Value) -->
+          <div class="tier-card best-value" onclick="openPremiumCheckout(12)">
+            <div class="tier-tag green">ВЫГОДА -40%</div>
+            <div class="tier-left">
+              <div class="tier-duration">12 месяцев</div>
+              <div class="tier-per-month" id="prem12PerMonth">~32 900 сум / мес</div>
+            </div>
+            <div class="tier-right">
+              <span class="tier-total" id="prem12Price">395 000 сум</span>
+              <span class="tier-action-pill">Выбрать</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PANEL 3: ORDERS -->
+      <section class="tab-panel" id="tab-orders">
+        <div class="orders-header-row">
+          <h2 class="panel-headline">История заказов</h2>
+          <button class="ghost-refresh-btn" onclick="loadOrders()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <polyline points="1 20 1 14 7 14"></polyline>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            Обновить
+          </button>
+        </div>
+
+        <div id="ordersContainer" class="orders-list-box">
+          <div class="loader-wrap"><div class="clean-spinner"></div></div>
+        </div>
+      </section>
+
+      <!-- PANEL 4: ADMIN -->
+      <section class="tab-panel" id="tab-admin">
+        <div class="admin-panel-head">
+          <div>
+            <h2 class="panel-headline">Панель управления</h2>
+            <p class="panel-subtitle">Управление тарифами и подтверждение заказов</p>
+          </div>
+          <span class="admin-badge">Admin #5379376281</span>
+        </div>
+
+        <!-- Metrics Grid -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <span class="metric-label">Всего заказов</span>
+            <span class="metric-val" id="adminMetricTotal">0</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Ожидают</span>
+            <span class="metric-val highlight" id="adminMetricPending">0</span>
+          </div>
+          <div class="metric-card wide">
+            <span class="metric-label">Выручка (выполнено)</span>
+            <span class="metric-val text-accent" id="adminMetricRevenue">0 сум</span>
+          </div>
+        </div>
+
+        <!-- Pending Orders in Admin -->
+        <div class="admin-subhead">
+          <span class="field-label">Ожидают вашего подтверждения</span>
+          <button class="ghost-refresh-btn" onclick="loadAdminInfo()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <polyline points="1 20 1 14 7 14"></polyline>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            Обновить
+          </button>
+        </div>
+
+        <div id="adminPendingOrdersList" class="admin-orders-list">
+          <div class="loader-wrap"><div class="clean-spinner"></div></div>
+        </div>
+
+        <!-- Settings Form -->
+        <div class="glass-card admin-settings-card">
+          <h3 class="card-title">Тарифы и реквизиты</h3>
+
+          <div class="form-group">
+            <label class="form-label" for="settingStarPrice">Цена за 1 звезду (сум)</label>
+            <input type="number" id="settingStarPrice" class="form-control" placeholder="220">
+          </div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingPrem3">Premium 3м (сум)</label>
+              <input type="number" id="settingPrem3" class="form-control" placeholder="175000">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingPrem6">Premium 6м (сум)</label>
+              <input type="number" id="settingPrem6" class="form-control" placeholder="245000">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingPrem12">Premium 12м (сум)</label>
+            <input type="number" id="settingPrem12" class="form-control" placeholder="395000">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingCardNumber">Номер карты для оплаты</label>
+            <input type="text" id="settingCardNumber" class="form-control" placeholder="5614681816265841">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingOrdersGroup">ID группы для заказов</label>
+            <input type="text" id="settingOrdersGroup" class="form-control" placeholder="-1003724696975">
+            <span class="field-help">Заказы автоматически отправляются в эту группу с кнопками</span>
+          </div>
+
+          <button class="cta-primary-btn" id="saveSettingsBtn" onclick="saveAdminSettings()">
+            <span>Сохранить тарифы</span>
+          </button>
+        </div>
+
+        <!-- Fragment Integration Form -->
+        <div class="glass-card admin-settings-card" style="margin-top: 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <h3 class="card-title" style="margin:0;">Автовыдача Fragment</h3>
+            <span id="fragmentStatusBadge" class="status-badge-clean pending">Не авторизован</span>
+          </div>
+          <p class="field-help" style="margin-bottom: 14px;">Прямая отправка Stars по официальному протоколу Fragment API</p>
+
+          <div class="form-group">
+            <label class="form-label" for="settingFragmentEnabled">Статус автовыдачи</label>
+            <select id="settingFragmentEnabled" class="form-control">
+              <option value="true">Включено (автоматическая доставка)</option>
+              <option value="false">Отключено (ручная выдача)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingFragmentPhone">Номер телефона Telegram</label>
+            <input type="text" id="settingFragmentPhone" class="form-control" placeholder="+998901234567">
+            <span class="field-help">Номер аккаунта, на который придёт запрос авторизации</span>
+          </div>
+
+          <div class="form-group">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
+              <label class="form-label" for="settingFragmentMnemonics" style="margin:0;">Seed-фраза кошелька TON (24 слова)</label>
+              <button type="button" id="genWalletBtn" onclick="generateWalletInApp()" class="admin-chip-btn">
+                ⚡ Сгенерировать 24 слова
+              </button>
+            </div>
+            <textarea id="settingFragmentMnemonics" class="form-control" rows="3" style="font-family: monospace; font-size: 13px;" placeholder="24 слова через пробел"></textarea>
+            <span class="field-help">Стандарт V4R2. Если кошелька на 24 слова нет — нажмите кнопку «Сгенерировать 24 слова» выше, скопируйте фразу и импортируйте её в Tonkeeper.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingFragmentApiKey">API Ключ Fragment (с дашборда fragment-api.com)</label>
+            <input type="text" id="settingFragmentApiKey" class="form-control" placeholder="Например: 6c3a1b4e-...">
+            <span class="field-help">Скопируйте в профиле на <a href="https://fragment-api.com/dashboard" target="_blank" class="text-link">fragment-api.com/dashboard</a></span>
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:8px; margin-top:14px;">
+            <button class="cta-primary-btn cta-btn-blue" id="startAuthFragmentBtn" onclick="startFragmentAuth()">
+              <span>🔑 Авторизовать Fragment</span>
+            </button>
+            <button class="cta-secondary-btn" id="saveFragmentBtn" onclick="saveAdminSettings()">
+              <span>Сохранить настройки</span>
+            </button>
+          </div>
+
+          <div class="instruction-list" style="margin-top: 14px;">
+            <div class="inst-step">
+              <span class="step-num">1</span>
+              <span>Нажмите «Авторизовать Fragment»</span>
+            </div>
+            <div class="inst-step">
+              <span class="step-num">2</span>
+              <span>В Telegram придёт запрос «Авторизация: fragment.com». Нажмите «Авторизоваться»</span>
+            </div>
+            <div class="inst-step">
+              <span class="step-num">3</span>
+              <span>Бот сохранит токен, и при клике «ТОЧНО ВЫДАТЬ» звёзды будут улетать автоматически</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Sheet Modal: Checkout -->
+    <div class="sheet-backdrop" id="checkoutModal">
+      <div class="sheet-surface">
+        <div class="sheet-drag-handle"></div>
+
+        <div class="sheet-header">
+          <h3 class="sheet-title">Оплата перевода</h3>
+          <button class="sheet-close-btn" onclick="closeCheckout()" aria-label="Закрыть">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div class="sheet-body">
+          <!-- Order Spec -->
+          <div class="order-spec-card">
+            <div class="spec-row">
+              <span class="spec-label">Товар</span>
+              <span class="spec-val" id="modalItemDesc">500 Stars</span>
+            </div>
+            <div class="spec-row">
+              <span class="spec-label">Получатель</span>
+              <span class="spec-val text-accent" id="modalRecipient">@username</span>
+            </div>
+            <div class="spec-row divider">
+              <span class="spec-label">Сумма к оплате</span>
+              <span class="spec-total" id="modalPrice">110 000 сум</span>
+            </div>
+          </div>
+
+          <!-- Requisites Card -->
+          <div class="requisites-card">
+            <div class="req-header">
+              <div class="card-chip-vector">
+                <svg width="24" height="18" viewBox="0 0 28 20" fill="none">
+                  <rect width="28" height="20" rx="3" fill="#18181b" stroke="rgba(255,255,255,0.1)"/>
+                  <rect x="2" y="3" width="7" height="14" rx="1.5" fill="#27272a"/>
+                  <line x1="9" y1="7" x2="26" y2="7" stroke="#3f3f46" stroke-width="1.5"/>
+                  <line x1="9" y1="13" x2="26" y2="13" stroke="#3f3f46" stroke-width="1.5"/>
+                </svg>
+              </div>
+              <span class="req-type-label">Карта для оплаты</span>
+            </div>
+
+            <div class="card-display" onclick="copyCardNumber()">
+              <span class="card-digits" id="modalCardNumber">5614 6818 1626 5841</span>
+              <button class="copy-action-btn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                Копировать
+              </button>
+            </div>
+
+            <div class="bank-annotation" id="modalCardHolder">Uzcard / Humo (любой банк Узбекистана)</div>
+          </div>
+
+          <!-- Comment input -->
+          <div class="form-group">
+            <label class="form-label" for="senderCommentInput">ФИО отправителя или последние 4 цифры карты</label>
+            <input 
+              type="text" 
+              id="senderCommentInput" 
+              class="form-control" 
+              placeholder="Например: Алишер И. или *5841"
+              autocomplete="off"
+            >
+          </div>
+
+          <!-- Quick instructions -->
+          <div class="instruction-list">
+            <div class="inst-step">
+              <span class="step-num">1</span>
+              <span>Скопируйте карту и переведите сумму в Click, Payme или Uzum</span>
+            </div>
+            <div class="inst-step">
+              <span class="step-num">2</span>
+              <span>Нажмите кнопку «Я оплатил» для отправки на проверку</span>
+            </div>
+          </div>
+
+          <button class="submit-payment-btn" id="confirmPayBtn" onclick="submitPayment()">
+            <span>Я оплатил</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Sheet Modal: Success -->
+    <div class="sheet-backdrop" id="successModal">
+      <div class="sheet-surface success-sheet">
+        <div class="success-check-badge">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+        </div>
+
+        <h3 class="success-title">Заказ передан на проверку</h3>
+        <p class="success-description">Номер заказа <span class="order-mono-id" id="successOrderId">#NS-123456</span>. Администратор проверит поступление платежа и доставит товар.</p>
+
+        <div class="success-spec-table">
+          <div class="s-row">
+            <span>Товар:</span>
+            <strong id="successItem">500 Stars</strong>
+          </div>
+          <div class="s-row">
+            <span>Получатель:</span>
+            <strong id="successRecipient">@username</strong>
+          </div>
+          <div class="s-row">
+            <span>К оплате:</span>
+            <strong class="text-accent" id="successPrice">110 000 сум</strong>
+          </div>
+        </div>
+
+        <p class="notification-notice">Уведомление о зачислении придёт в чат Telegram-бота.</p>
+
+        <button class="cta-primary-btn" onclick="closeSuccessModal()">
+          <span>Перейти к заказам</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="footer-safe-spacer"></div>
+  </div>
+
+  <div class="toast-notification" id="toast"></div>
+
+  <script src="src/utils/api.js?v=11"></script>
+  <script src="src/utils/helpers.js?v=11"></script>
+  <script src="src/app.js?v=11"></script>
+</body>
+</html>
