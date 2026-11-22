@@ -3,10 +3,26 @@
  * Работает через официальный API шлюз Fragment (api.fragment-api.com)
  */
 
+const fs = require('fs');
+const path = require('path');
 const { dao } = require('./database');
 const { mnemonicNew, mnemonicValidate, mnemonicWordList } = require('@ton/crypto');
 
 const FRAGMENT_BASE_URL = 'https://api.fragment-api.com/v1';
+
+function getEffectiveFragmentToken() {
+  const settings = dao.getAllSettings();
+  let token = settings.fragment_jwt_token || process.env.FRAGMENT_JWT_TOKEN || '';
+  if (!token) {
+    const tokenFilePath = path.join(__dirname, 'fragment_token.txt');
+    if (fs.existsSync(tokenFilePath)) {
+      try {
+        token = fs.readFileSync(tokenFilePath, 'utf8').trim();
+      } catch (e) {}
+    }
+  }
+  return token;
+}
 
 const FragmentService = {
   /**
@@ -26,14 +42,14 @@ const FragmentService = {
    */
   getConfig() {
     const settings = dao.getAllSettings();
-    const token = settings.fragment_jwt_token || '';
+    const token = getEffectiveFragmentToken();
     return {
       enabled: settings.fragment_enabled === 'true',
-      phone: settings.fragment_phone || '',
+      phone: settings.fragment_phone || '+998930690203',
       mnemonics: settings.fragment_mnemonics || '',
-      apiKey: settings.fragment_api_key || '',
+      apiKey: settings.fragment_api_key || token,
       hasToken: Boolean(token),
-      tokenPreview: token ? token.substring(0, 10) + '...' : '',
+      tokenPreview: token ? token.substring(0, 15) + '...' : '',
       savedAt: settings.fragment_jwt_saved_at || null
     };
   },
@@ -178,8 +194,7 @@ const FragmentService = {
    */
   async dispatchOrder(order) {
     const config = this.getConfig();
-    const settings = dao.getAllSettings();
-    const token = settings.fragment_jwt_token;
+    const token = getEffectiveFragmentToken();
 
     const cleanUsername = String(order.recipient_username || '').replace(/^@/, '').trim();
     if (!cleanUsername) {
