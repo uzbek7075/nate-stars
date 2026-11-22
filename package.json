@@ -1,0 +1,23 @@
+{
+  "name": "nate-stars",
+  "version": "1.0.0",
+  "description": "Nate Stars — Telegram Stars & Premium Shop Mini App and Bot",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js"
+  },
+  "dependencies": {
+    "@ton/crypto": "^3.3.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "localtunnel": "^2.0.2",
+    "sql.js": "^1.11.0",
+    "telegraf": "^4.16.3",
+    "untun": "^0.2.2",
+    "uuid": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
