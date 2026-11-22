@@ -146,7 +146,16 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
   if (fragmentEnabled !== undefined) dao.setSetting('fragment_enabled', String(fragmentEnabled));
   if (fragmentPhone !== undefined) dao.setSetting('fragment_phone', String(fragmentPhone));
   if (fragmentMnemonics !== undefined) dao.setSetting('fragment_mnemonics', String(fragmentMnemonics));
-  if (fragmentApiKey !== undefined) dao.setSetting('fragment_api_key', String(fragmentApiKey));
+  if (fragmentApiKey !== undefined) {
+    const cleanKey = String(fragmentApiKey).trim();
+    dao.setSetting('fragment_api_key', cleanKey);
+    if (cleanKey.startsWith('eyJ')) {
+      dao.setSetting('fragment_jwt_token', cleanKey);
+      dao.setSetting('fragment_jwt_saved_at', new Date().toISOString());
+      dao.setSetting('fragment_enabled', 'true');
+      console.log('✅ [Admin API] JWT-токен Fragment сохранён и активирован напрямую!');
+    }
+  }
 
   res.json({ 
     success: true, 
