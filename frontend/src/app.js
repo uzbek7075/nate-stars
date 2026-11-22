@@ -581,6 +581,26 @@ async function startFragmentAuth() {
     return Helpers.showToast('Укажите API Ключ! Получите его на fragment-api.com');
   }
 
+  // Если вставлен прямой JWT-токен (начинается на eyJ), активируем его без запроса к Telegram
+  if (apiKey.startsWith('eyJ')) {
+    try {
+      Helpers.showToast('Активация JWT токена Fragment...');
+      await API.saveSettings({
+        fragmentEnabled: true,
+        fragmentPhone: phone,
+        fragmentMnemonics: mnemonics,
+        fragmentApiKey: apiKey
+      });
+      Helpers.haptic('success');
+      Helpers.showToast('✅ Fragment успешно авторизован!');
+      await loadAdminData();
+      return;
+    } catch (e) {
+      Helpers.showToast('Ошибка: ' + e.message);
+      return;
+    }
+  }
+
   if (btn) {
     btn.disabled = true;
     btn.innerHTML = '<span>⏳ Ожидание нажатия в Telegram...</span>';
