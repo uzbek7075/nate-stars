@@ -101,22 +101,13 @@ async function initDatabase() {
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_ids', '5379376281')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('orders_chat_id', '-1003724696975')");
 
-  // Авторизация Fragment (гарантированное сохранение сессии)
-  let fragmentToken = process.env.FRAGMENT_JWT_TOKEN || '';
-  const tokenFilePath = path.join(__dirname, 'fragment_token.txt');
-  if (!fragmentToken && fs.existsSync(tokenFilePath)) {
-    try {
-      fragmentToken = fs.readFileSync(tokenFilePath, 'utf8').trim();
-    } catch (e) {}
-  }
-  if (fragmentToken) {
-    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_jwt_token', ?)", [fragmentToken]);
-    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_enabled', 'true')");
-    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_phone', '+998930690203')");
-    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_mnemonics', 'harbor age artwork marble cram manage dolphin evolve walnut firm dose dynamic lift castle eye boil guilt minute feel diesel search top void door')");
-    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_api_key', ?)", [fragmentToken]);
-    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_jwt_saved_at', ?)", [new Date().toISOString()]);
-  }
+  // Авторизация Fragment (гарантированное сохранение настроек)
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_enabled', 'true')");
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_phone', '+998930690203')");
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_mnemonics', 'harbor age artwork marble cram manage dolphin evolve walnut firm dose dynamic lift castle eye boil guilt minute feel diesel search top void door')");
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_wallet_address', 'UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5G1e')");
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_api_key', 'e153ec41-bb0b-4e74-998d-bc5c7a36634c')");
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_jwt_saved_at', ?)", [new Date().toISOString()]);
 
   saveDb();
   console.log('✅ База данных и настройки успешно инициализированы');
