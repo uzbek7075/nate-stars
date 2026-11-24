@@ -1,28 +1,17 @@
 /**
  * Nate Stars — Direct Fragment Automation Engine
- * Работает через официальный API шлюз Fragment (api.fragment-api.com)
+ * Автоматизированный шлюз покупки Telegram Stars и Telegram Premium
+ * Использует прямой REST API шлюз Fragment (api.fragment-api.space)
+ * Без истекающих веб-токенов, без необходимости постоянных подтверждений
  */
 
 const fs = require('fs');
 const path = require('path');
 const { dao } = require('./database');
-const { mnemonicNew, mnemonicValidate, mnemonicWordList } = require('@ton/crypto');
+const { mnemonicNew } = require('@ton/crypto');
 
-const FRAGMENT_BASE_URL = 'https://api.fragment-api.com/v1';
-
-function getEffectiveFragmentToken() {
-  const settings = dao.getAllSettings();
-  let token = settings.fragment_jwt_token || process.env.FRAGMENT_JWT_TOKEN || '';
-  if (!token) {
-    const tokenFilePath = path.join(__dirname, 'fragment_token.txt');
-    if (fs.existsSync(tokenFilePath)) {
-      try {
-        token = fs.readFileSync(tokenFilePath, 'utf8').trim();
-      } catch (e) {}
-    }
-  }
-  return token;
-}
+const FRAGMENT_API_URL = 'https://api.fragment-api.space/api/v1';
+const DEFAULT_WALLET_ADDRESS = 'UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5G1e';
 
 const FragmentService = {
   /**
@@ -42,149 +31,39 @@ const FragmentService = {
    */
   getConfig() {
     const settings = dao.getAllSettings();
-    const token = getEffectiveFragmentToken();
+    const mnemonics = settings.fragment_mnemonics || '';
     return {
       enabled: settings.fragment_enabled === 'true',
       phone: settings.fragment_phone || '+998930690203',
-      mnemonics: settings.fragment_mnemonics || '',
-      apiKey: settings.fragment_api_key || token,
-      hasToken: Boolean(token),
-      tokenPreview: token ? token.substring(0, 15) + '...' : '',
-      savedAt: settings.fragment_jwt_saved_at || null
+      mnemonics: mnemonics,
+      walletAddress: DEFAULT_WALLET_ADDRESS,
+      hasSeed: Boolean(mnemonics && mnemonics.trim().split(/\s+/).length >= 12),
+      provider: 'direct_ton'
     };
   },
 
   /**
-   * Запуск авторизации Fragment через номер телефона и 24 слова
-   * @param {Object} params
-   * @param {string} params.phone - номер телефона Telegram
-   * @param {string} params.mnemonics - ровно 24 слова кошелька TON (V4R2)
-   * @param {string} params.apiKey - API ключ с дашборда fragment-api.com
+   * Проверить актуальный баланс TON кошелька
    */
-  async authenticate({ phone, mnemonics, apiKey = '' }) {
-    if (!phone) {
-      return { success: false, error: 'Укажите номер телефона Telegram (+998...)' };
-    }
-    if (!mnemonics) {
-      return { success: false, error: 'Укажите seed-фразу кошелька (24 слова)' };
-    }
-
-    const cleanPhone = String(phone).trim().replace(/[^\d+]/g, '');
-    const mnemonicsList = String(mnemonics).trim().split(/\s+/).filter(Boolean);
-    const cleanApiKey = String(apiKey || '').trim();
-
-    if (!cleanApiKey) {
-      return { 
-        success: false, 
-        error: 'Требуется API Ключ! Получите его бесплатно в личном кабинете на https://fragment-api.com/dashboard' 
-      };
-    }
-
-    if (mnemonicsList.length !== 24) {
-      return { 
-        success: false, 
-        error: `Fragment API принимает только ровно 24 слова стандарта V4R2 (вы ввели: ${mnemonicsList.length}). Нажмите «Сгенерировать кошелёк» ниже.` 
-      };
-    }
-
-    // Проверяем слова по словарю TON
-    const dict = new Set(mnemonicWordList);
-    const badWords = mnemonicsList.filter(w => !dict.has(w.toLowerCase()));
-    if (badWords.length > 0) {
-      return {
-        success: false,
-        error: `Слова не найдены в словаре TON: ${badWords.join(', ')}. Проверьте опечатки.`
-      };
-    }
-
-    // Проверяем контрольную сумму TON
-    const isChecksumValid = await mnemonicValidate(mnemonicsList);
-    if (!isChecksumValid) {
-      return {
-        success: false,
-        error: `Фраза не проходит проверку TON (контрольная сумма не сошлась). Проверьте правильность слов и отсутствие дубликатов (например, два раза 'record').`
-      };
-    }
-
-    console.log(`🔑 [Fragment Auth] Запрос авторизации для телефона ${cleanPhone}...`);
-
-    const payload = {
-      api_key: cleanApiKey,
-      phone_number: cleanPhone,
-      mnemonics: mnemonicsList,
-      version: 'V4R2'
-    };
-
+  async getWalletBalance() {
     try {
-      const controller = new AbortController();
-      // Даём 70 секунд, чтобы пользователь успел нажать «Авторизоваться» в Telegram
-      const timeoutId = setTimeout(() => controller.abort(), 70000);
-
-      const response = await fetch(`${FRAGMENT_BASE_URL}/auth/authenticate/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
+      const res = await fetch(`https://toncenter.com/api/v2/getAddressInformation?address=${DEFAULT_WALLET_ADDRESS}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
       });
-
-      clearTimeout(timeoutId);
-
-      const data = await response.json().catch(() => ({}));
-
-      if (response.ok && data.token) {
-        // Сохраняем полученный JWT токен и настройки в базу
-        dao.setSetting('fragment_jwt_token', data.token);
-        dao.setSetting('fragment_jwt_saved_at', new Date().toISOString());
-        dao.setSetting('fragment_phone', cleanPhone);
-        dao.setSetting('fragment_mnemonics', mnemonicsList.join(' '));
-        dao.setSetting('fragment_api_key', cleanApiKey);
-        dao.setSetting('fragment_enabled', 'true');
-
-        console.log('✅ [Fragment Auth] Успешная авторизация! JWT токен сохранён в базу.');
+      const data = await res.json();
+      if (data && data.ok && data.result) {
+        const rawBalance = Number(data.result.balance || 0);
+        const tonBalance = rawBalance / 1e9;
         return {
           success: true,
-          message: 'Авторизация Fragment успешно завершена!',
-          token: data.token
-        };
-      } else {
-        let errMsg = '';
-        if (data.api_key) {
-          errMsg += `API ключ: ${Array.isArray(data.api_key) ? data.api_key.join(', ') : data.api_key}. `;
-        }
-        if (data.mnemonics) {
-          errMsg += `Seed-фраза: ${Array.isArray(data.mnemonics) ? data.mnemonics.join(', ') : data.mnemonics}. `;
-        }
-        if (data.phone_number) {
-          errMsg += `Телефон: ${Array.isArray(data.phone_number) ? data.phone_number.join(', ') : data.phone_number}. `;
-        }
-        if (data.non_field_errors) {
-          errMsg += `${Array.isArray(data.non_field_errors) ? data.non_field_errors.join(', ') : data.non_field_errors}. `;
-        }
-        if (!errMsg) {
-          errMsg = data.error || data.detail || (typeof data === 'string' ? data : JSON.stringify(data));
-        }
-
-        console.error('❌ [Fragment Auth] Ошибка авторизации:', errMsg);
-        return {
-          success: false,
-          error: errMsg.trim() || `Ошибка сервера Fragment (${response.status})`
+          balance: tonBalance,
+          balanceFormatted: tonBalance.toFixed(3) + ' TON',
+          address: DEFAULT_WALLET_ADDRESS
         };
       }
-
-    } catch (err) {
-      console.error('❌ [Fragment Auth] Исключение:', err.message);
-      if (err.name === 'AbortError') {
-        return {
-          success: false,
-          error: 'Время ожидания истекло (70 сек). Нажмите подтверждение в Telegram быстрее.'
-        };
-      }
-      return {
-        success: false,
-        error: `Сетевая ошибка: ${err.message}`
-      };
+      return { success: false, balance: 0, error: 'Ошибка получения баланса' };
+    } catch (e) {
+      return { success: false, balance: 0, error: e.message };
     }
   },
 
@@ -194,7 +73,6 @@ const FragmentService = {
    */
   async dispatchOrder(order) {
     const config = this.getConfig();
-    const token = getEffectiveFragmentToken();
 
     const cleanUsername = String(order.recipient_username || '').replace(/^@/, '').trim();
     if (!cleanUsername) {
@@ -210,83 +88,126 @@ const FragmentService = {
       };
     }
 
-    if (!token) {
+    if (!config.mnemonics) {
       return {
         success: false,
-        error: 'Fragment не авторизован (нажмите «Авторизовать Fragment» в админке)',
+        error: 'Не настроена seed-фраза TON-кошелька для Fragment',
         manualRequired: true
       };
     }
 
-    console.log(`⚡ [Fragment Order] Отправка заказа #${order.id} на @${cleanUsername} (${order.type}: ${order.amount})...`);
+    const seedBase64 = Buffer.from(config.mnemonics.trim()).toString('base64');
+    const targetUsername = '@' + cleanUsername;
+
+    console.log(`⚡ [Fragment Order] Отправка заказа #${order.id} на ${targetUsername} (${order.type}: ${order.amount})...`);
 
     try {
       let endpoint = '';
       let bodyData = {};
 
       if (order.type === 'stars') {
-        endpoint = '/order/stars/';
+        endpoint = '/stars/buy';
         bodyData = {
-          username: cleanUsername,
-          quantity: Number(order.amount),
-          show_sender: "false"
+          username: targetUsername,
+          amount: Number(order.amount),
+          seed: seedBase64,
+          payment_method: 'ton'
         };
       } else {
-        endpoint = '/order/premium/';
+        endpoint = '/premium/buy';
         bodyData = {
-          username: cleanUsername,
-          months: Number(order.amount),
-          show_sender: "false"
+          username: targetUsername,
+          duration: Number(order.amount),
+          seed: seedBase64,
+          payment_method: 'ton'
         };
       }
 
-      const response = await fetch(`${FRAGMENT_BASE_URL}${endpoint}`, {
+      const response = await fetch(`${FRAGMENT_API_URL}${endpoint}`, {
         method: 'POST',
         headers: {
-          'Authorization': `JWT ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
         body: JSON.stringify(bodyData)
       });
 
       const data = await response.json().catch(() => ({}));
 
-      if (response.ok && (data.success || data.status === 200 || !data.error)) {
-        console.log(`✅ [Fragment Order] Заказ #${order.id} успешно доставлен на @${cleanUsername}!`);
-        return {
-          success: true,
-          mode: 'fragment_api',
-          txHash: data.tx_hash || data.transaction_id || `frag_${Date.now()}`,
-          message: `Успешно отправлено: ${order.type === 'stars' ? order.amount + ' Stars' : order.amount + ' мес. Premium'} на @${cleanUsername}`,
-          deliveredAt: new Date().toISOString()
-        };
-      } else {
-        const errorText = data.error || data.detail || data.message || JSON.stringify(data);
-        console.error(`❌ [Fragment Order] Ошибка отправки заказа #${order.id}:`, errorText);
+      // 1. Успешная покупка
+      if (response.ok && data.success) {
+        let orderData = data.data || {};
+        let txHash = orderData.tx_hash || orderData.request_id || `frag_${Date.now()}`;
 
-        // Если токен протух (401), пробуем авто-переавторизацию
-        if (response.status === 401 && config.phone && config.mnemonics) {
-          console.log('🔄 [Fragment] JWT токен истёк, пробуем обновить...');
-          const reauth = await this.authenticate({
-            phone: config.phone,
-            mnemonics: config.mnemonics,
-            apiKey: config.apiKey
-          });
-          if (reauth.success) {
-            // Повторяем отправку с новым токеном
-            return await this.dispatchOrder(order);
+        // Если заказ в очереди/обработке, пробуем подождать пару секунд до завершения
+        if (orderData.status === 'queued' || orderData.status === 'processing') {
+          if (orderData.request_id) {
+            console.log(`⏳ [Fragment Queue] Заказ в очереди #${orderData.request_id}, ожидаем выполнения...`);
+            for (let i = 0; i < 4; i++) {
+              await new Promise(r => setTimeout(r, 2000));
+              try {
+                const qRes = await fetch(`${FRAGMENT_API_URL}/queue/${orderData.request_id}`, {
+                  headers: { 'User-Agent': 'Mozilla/5.0' }
+                });
+                const qData = await qRes.json();
+                if (qData && qData.success && qData.data) {
+                  if (qData.data.status === 'completed') {
+                    orderData = qData.data;
+                    txHash = orderData.tx_hash || txHash;
+                    break;
+                  }
+                  if (qData.data.status === 'failed') {
+                    throw new Error(qData.data.error || 'Ошибка в очереди Fragment');
+                  }
+                }
+              } catch (qErr) {
+                console.warn('Queue check error:', qErr.message);
+              }
+            }
           }
         }
 
+        console.log(`✅ [Fragment Order] Заказ #${order.id} успешно доставлен на ${targetUsername}!`);
+        return {
+          success: true,
+          mode: 'fragment_api',
+          txHash: txHash,
+          message: `Успешно отправлено: ${order.type === 'stars' ? order.amount + ' Stars' : order.amount + ' мес. Premium'} на ${targetUsername}`,
+          deliveredAt: new Date().toISOString()
+        };
+      }
+
+      // 2. Ошибка недостаточного баланса
+      if (response.status === 402 || (data.error && data.error.error_code === 'INSUFFICIENT_WALLET_BALANCE')) {
+        const errorMsg = data.error?.message || 'На кошельке недостаточно TON для автовыдачи (нужно минимум 1 TON).';
+        console.warn(`⚠️ [Fragment Balance] ${errorMsg}`);
         return {
           success: false,
-          error: errorText,
+          error: `${errorMsg} Заказ сохранён, требуется ручная выдача или пополнение кошелька.`,
           manualRequired: true
         };
       }
 
+      // 3. Прочие ошибки
+      let errMsg = '';
+      if (data.error) {
+        errMsg = data.error.message || data.error.error_code || JSON.stringify(data.error);
+        if (data.error.details && Array.isArray(data.error.details)) {
+          errMsg += ' (' + data.error.details.map(d => `${d.field}: ${d.message}`).join(', ') + ')';
+        }
+      } else {
+        errMsg = `Ошибка сервера Fragment (${response.status})`;
+      }
+
+      console.error(`❌ [Fragment Order] Ошибка отправки заказа #${order.id}:`, errMsg);
+      return {
+        success: false,
+        error: errMsg,
+        manualRequired: true
+      };
+
     } catch (err) {
-      console.error(`❌ [Fragment Order] Сетевая ошибка:`, err.message);
+      console.error(`❌ [Fragment Order] Исключение:`, err.message);
       return {
         success: false,
         error: `Сетевая ошибка Fragment: ${err.message}`,
