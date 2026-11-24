@@ -537,22 +537,14 @@ html, body {
   box-shadow: 0 0 20px -4px var(--blue-glow);
 }
 
-.preset-pill.featured {
-  border-color: rgba(59, 130, 246, 0.32);
-  color: var(--blue-bright);
-}
-
-.preset-pill.featured.active {
-  background: rgba(37, 99, 235, 0.28);
-  border-color: var(--blue-hi);
-}
-
-.pill-dot {
+.preset-pill.active::after {
+  content: '';
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--blue-bright);
   box-shadow: 0 0 6px var(--blue-bright);
+  margin-left: 2px;
 }
 
 /* Cost Summary */
