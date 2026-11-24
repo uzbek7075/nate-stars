@@ -11,7 +11,7 @@ const { dao } = require('./database');
 const { mnemonicNew } = require('@ton/crypto');
 
 const FRAGMENT_API_URL = 'https://api.fragment-api.space/api/v1';
-const DEFAULT_WALLET_ADDRESS = 'UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5G1e';
+const DEFAULT_WALLET_ADDRESS = 'UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5LCk';
 
 const FragmentService = {
   /**
