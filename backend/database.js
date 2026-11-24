@@ -105,7 +105,7 @@ async function initDatabase() {
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_enabled', 'true')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_phone', '+998930690203')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_mnemonics', 'harbor age artwork marble cram manage dolphin evolve walnut firm dose dynamic lift castle eye boil guilt minute feel diesel search top void door')");
-  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_wallet_address', 'UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5G1e')");
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_wallet_address', 'UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5LCk')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_api_key', 'e153ec41-bb0b-4e74-998d-bc5c7a36634c')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_jwt_saved_at', ?)", [new Date().toISOString()]);
 
