@@ -786,19 +786,23 @@ app.get('/api/orders', auth, (req, res) => {
 // Команда /start
 bot.start((ctx) => {
   const urlToUse = WEBAPP_URL || `http://localhost:${PORT}`;
-  
+  const userNick = ctx.from?.username
+    ? '@' + ctx.from.username
+    : (ctx.from?.first_name || 'друг');
+
   ctx.reply(
-    '<b>Nate Stars</b>\n\n' +
-    'Сервис покупки Telegram Stars и Premium подписок в Узбекистане.\n\n' +
-    '• Оплата в сумах (UZS) через Uzcard и Humo\n' +
-    '• Быстрая доставка подарком по @username\n' +
-    '• Без передачи паролей и конфиденциальных данных\n\n' +
-    'Нажмите кнопку ниже для открытия каталога:',
+    `Привет, <b>${escapeHtml(userNick)}</b>! 👋\n\n` +
+    `Здесь вы можете быстро приобрести <b>Telegram Stars</b> и <b>Premium</b> подписку на свой аккаунт за сумы.\n\n` +
+    `⚡ Доставка за пару секунд\n` +
+    `💳 Оплата в сумах (Uzcard / Humo) без переплат App Store\n` +
+    `🛡 Без входа в аккаунт и паролей — отправка подарком по @username\n` +
+    `🤖 Автоматическое подтверждение и выдача 24/7\n\n` +
+    `Нажмите кнопку ниже, чтобы открыть магазин:`,
     {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [{ text: 'Открыть Nate Stars', web_app: { url: urlToUse } }]
+          [{ text: '⭐ Открыть Nate Stars', web_app: { url: urlToUse } }]
         ]
       }
     }

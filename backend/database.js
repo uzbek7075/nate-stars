@@ -104,13 +104,13 @@ async function initDatabase() {
 
   // Значения по умолчанию для настроек (ID владельца: 5379376281, Группа: -1003724696975)
   const defaultSettings = {
-    'star_price_uzs': '220',
+    'star_price_uzs': '210',
     'min_stars': '50',
     'card_number': '5614681816265841',
     'card_holder': 'Карта для перевода (Uzcard / Humo)',
-    'premium_3_uzs': '175000',
-    'premium_6_uzs': '245000',
-    'premium_12_uzs': '395000',
+    'premium_3_uzs': '163000',
+    'premium_6_uzs': '220000',
+    'premium_12_uzs': '390000',
     'admin_ids': '5379376281',
     'orders_chat_id': '-1003724696975',
     'fragment_enabled': 'true',
