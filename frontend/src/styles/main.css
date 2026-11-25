@@ -924,6 +924,12 @@ html, body {
   color: var(--state-pending);
 }
 
+.status-badge-clean.processing {
+  background: rgba(37, 99, 235, 0.18);
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  color: var(--blue-bright);
+}
+
 .status-badge-clean.confirmed {
   background: var(--ok-bg);
   border: 1px solid var(--ok-border);
@@ -1573,4 +1579,87 @@ html, body {
   border-radius: var(--r-sm);
   font-size: 0.72rem;
   color: var(--text-mute);
+}
+
+/* Top Active Order Reassurance Banner */
+.active-order-banner {
+  margin: 12px 16px 4px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: transform var(--dur-fast), border-color var(--dur-fast);
+}
+
+.active-order-banner:active {
+  transform: scale(0.985);
+}
+
+.active-order-banner.state-paid {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.14) 0%, rgba(37, 99, 235, 0.16) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.42);
+  box-shadow: 0 8px 24px -12px rgba(16, 185, 129, 0.35);
+}
+
+.active-order-banner.state-pending {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(37, 99, 235, 0.14) 100%);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  box-shadow: 0 8px 24px -12px rgba(245, 158, 11, 0.3);
+}
+
+.active-banner-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.active-banner-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-hi);
+}
+
+.banner-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: bannerPulse 1.6s infinite;
+}
+
+.state-paid .banner-pulse-dot {
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+}
+
+.state-pending .banner-pulse-dot {
+  background: var(--state-pending);
+  box-shadow: 0 0 8px var(--state-pending);
+}
+
+@keyframes bannerPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
+.active-banner-link {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--blue-bright);
+  white-space: nowrap;
+}
+
+.active-banner-desc {
+  font-size: 0.74rem;
+  line-height: 1.42;
+  color: var(--text-mute);
+}
+
+.active-banner-desc strong {
+  color: var(--text-hi);
 }

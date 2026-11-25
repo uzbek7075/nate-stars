@@ -155,16 +155,35 @@ async function notifyAdminsOfPendingOrder(order) {
   });
 }
 
+async function sendDeliveredClientMessage(order) {
+  const itemDesc = order.type === 'stars'
+    ? `${order.amount} Telegram Stars`
+    : `Telegram Premium на ${order.amount} мес.`;
+
+  const clientMsg =
+    `<b>Заказ #${escapeHtml(order.id)} выполнен</b>\n\n` +
+    `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
+    `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
+    `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
+    `Товар успешно доставлен на указанный аккаунт. Спасибо за покупку в Nate Stars.`;
+
+  try {
+    await bot.telegram.sendMessage(order.telegram_id, clientMsg, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.warn('Не удалось уведомить клиента:', e.message);
+  }
+}
+
 /**
- * Единая точка выполнения заказа (подтверждение + отправка через Fragment + уведомления).
- * Используется вручную из админки/группы и автоматически при срабатывании CardXabar.
+ * Единая точка выполнения заказа (отправка через Fragment + перевод в confirmed или paid_processing).
  */
 async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual', cardXabarInfo = null, skipGroupNotice = false } = {}) {
   const order = dao.getOrder(orderId);
   if (!order) return { ok: false, reason: 'not_found' };
   if (order.status === 'confirmed') return { ok: false, reason: 'already_confirmed', order };
 
-  dao.updateOrderStatus(orderId, 'confirmed', source);
+  // Сразу фиксируем статус 'paid_processing' (оплата получена), чтобы исключить гонку и потерю заказа
+  dao.updateOrderStatus(orderId, 'paid_processing', source);
 
   const fragmentRes = await FragmentService.dispatchOrder(order);
   console.log(`⚡ [Order Fulfill #${orderId} via ${source}]`, fragmentRes);
@@ -173,22 +192,21 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
     ? `${order.amount} Telegram Stars`
     : `Telegram Premium на ${order.amount} мес.`;
 
-  const clientMsg = fragmentRes.success
-    ? `<b>Заказ #${escapeHtml(order.id)} выполнен</b>\n\n` +
+  if (fragmentRes.success) {
+    dao.updateOrderStatus(orderId, 'confirmed', source);
+    await sendDeliveredClientMessage(order);
+  } else {
+    const waitClientMsg =
+      `✅ <b>Оплата по заказу #${escapeHtml(order.id)} получена!</b>\n\n` +
       `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
       `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
       `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
-      `Товар успешно доставлен на указанный аккаунт. Спасибо за покупку в Nate Stars.`
-    : `<b>Оплата по заказу #${escapeHtml(order.id)} подтверждена</b>\n\n` +
-      `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
-      `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
-      `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
-      `Заказ передан на выдачу и скоро поступит на указанный аккаунт.`;
-
-  try {
-    await bot.telegram.sendMessage(order.telegram_id, clientMsg, { parse_mode: 'HTML' });
-  } catch (e) {
-    console.warn('Не удалось уведомить клиента:', e.message);
+      `⏳ Администратор уже получил заказ и скоро отправит его вручную (если администратор сейчас на учёбе или занят, выдача может занять немного времени — не переживайте, статус заказа виден в шапке магазина).`;
+    try {
+      await bot.telegram.sendMessage(order.telegram_id, waitClientMsg, { parse_mode: 'HTML' });
+    } catch (e) {
+      console.warn('Не удалось уведомить клиента:', e.message);
+    }
   }
 
   if (!skipGroupNotice) {
@@ -197,12 +215,14 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
       fragmentNote = `⚡ <b>Fragment:</b> ${escapeHtml(fragmentRes.message)}`;
       if (fragmentRes.txHash) fragmentNote += `\n🔗 <code>${escapeHtml(fragmentRes.txHash)}</code>`;
     } else {
-      fragmentNote = `⚠️ <b>Fragment:</b> ${escapeHtml(fragmentRes.error)}`;
+      fragmentNote = `⚠️ <b>Fragment:</b> ${escapeHtml(fragmentRes.error)}\n<i>Заказ помечен «Оплачен · Ожидает выдачи». Пополните TON и нажмите «Повторить Fragment» или выдайте вручную.</i>`;
     }
 
     const header = source === 'cardxabar'
       ? `⚡ <b>АВТООПЛАТА CARDXABAR (#${escapeHtml(order.id)})</b>`
-      : `✅ <b>ЗАКАЗ #${escapeHtml(order.id)} ПОДТВЕРЖДЁН</b> (${escapeHtml(confirmedBy)})`;
+      : source === 'retry'
+        ? `🔄 <b>ПОВТОРНАЯ ВЫДАЧА (#${escapeHtml(order.id)})</b> (${escapeHtml(confirmedBy)})`
+        : `✅ <b>ЗАКАЗ #${escapeHtml(order.id)} ПОДТВЕРЖДЁН</b> (${escapeHtml(confirmedBy)})`;
 
     const cardLine = cardXabarInfo
       ? `💳 Зачислено: <code>+${formatUzs(cardXabarInfo.amount)}</code> (карта ***${escapeHtml(cardXabarInfo.cardLast4)})\n`
@@ -217,10 +237,32 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
       `• <b>Сумма:</b> <code>${formatUzs(order.price_uzs)}</code>\n\n` +
       fragmentNote;
 
-    await sendToAdminAndGroup(groupMsg);
+    const extraOpts = fragmentRes.success
+      ? {}
+      : {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🔄 Повторить Fragment', callback_data: `retry_frag_${order.id}` },
+                { text: '✅ Выдано вручную', callback_data: `manual_done_${order.id}` }
+              ]
+            ]
+          }
+        };
+
+    await sendToAdminAndGroup(groupMsg, extraOpts);
   }
 
-  return { ok: true, order, fragment: fragmentRes };
+  return { ok: true, order: dao.getOrder(orderId), fragment: fragmentRes };
+}
+
+async function completeOrderManually(orderId) {
+  const order = dao.getOrder(orderId);
+  if (!order) return { ok: false, reason: 'not_found' };
+  if (order.status === 'confirmed') return { ok: false, reason: 'already_confirmed', order };
+  dao.updateOrderStatus(orderId, 'confirmed', 'manual');
+  await sendDeliveredClientMessage(order);
+  return { ok: true, order: dao.getOrder(orderId) };
 }
 
 async function handleCardXabarPayment({ amount, cardLast4, msgId, msgDateMs }) {
@@ -273,7 +315,7 @@ app.get('/api/catalog', (req, res) => {
   });
 });
 
-// Профиль пользователя и флаг isAdmin
+// Профиль пользователя, флаг isAdmin и активные заказы в работе
 app.get('/api/user', auth, (req, res) => {
   const tgUser = req.telegramUser;
   dao.upsertUser({
@@ -283,9 +325,11 @@ app.get('/api/user', auth, (req, res) => {
     lastName: tgUser.last_name
   });
   const user = dao.getUser(tgUser.id);
+  const activeOrders = dao.getUserActiveOrders(tgUser.id);
   res.json({
     user,
-    isAdmin: isAdmin(tgUser.id)
+    isAdmin: isAdmin(tgUser.id),
+    activeOrders
   });
 });
 
@@ -449,7 +493,7 @@ app.post('/api/admin/fragment-auth', auth, requireAdmin, async (req, res) => {
   }
 });
 
-// Админ-панель: подтверждение / отклонение заказа из Mini App
+// Админ-панель: подтверждение / повтор Fragment / ручная выдача / отклонение заказа
 app.post('/api/admin/order-action', auth, requireAdmin, async (req, res) => {
   const { orderId, action } = req.body;
   const order = dao.getOrder(orderId);
@@ -458,10 +502,12 @@ app.post('/api/admin/order-action', auth, requireAdmin, async (req, res) => {
     return res.status(404).json({ error: 'Заказ не найден' });
   }
 
-  if (action === 'confirm') {
+  const adminName = req.telegramUser?.username ? '@' + req.telegramUser.username : 'Admin';
+
+  if (action === 'confirm' || action === 'retry') {
     const fulfilled = await fulfillOrder(orderId, {
-      confirmedBy: req.telegramUser?.username ? '@' + req.telegramUser.username : 'Admin',
-      source: 'manual',
+      confirmedBy: adminName,
+      source: action === 'retry' ? 'retry' : 'manual',
       skipGroupNotice: false
     });
     if (!fulfilled.ok && fulfilled.reason === 'already_confirmed') {
@@ -469,9 +515,15 @@ app.post('/api/admin/order-action', auth, requireAdmin, async (req, res) => {
     }
     return res.json({
       success: true,
-      status: 'confirmed',
+      status: fulfilled.order?.status || 'paid_processing',
       fragment: fulfilled.fragment
     });
+  } else if (action === 'manual_done') {
+    const doneRes = await completeOrderManually(orderId);
+    if (!doneRes.ok && doneRes.reason === 'already_confirmed') {
+      return res.json({ success: true, status: 'confirmed', alreadyConfirmed: true });
+    }
+    return res.json({ success: true, status: 'confirmed' });
   } else if (action === 'reject') {
     dao.updateOrderStatus(orderId, 'rejected');
 
@@ -722,10 +774,11 @@ app.post('/api/create-order', auth, async (req, res) => {
   }
 });
 
-// История заказов пользователя
+// История заказов пользователя и текущие заказы в работе
 app.get('/api/orders', auth, (req, res) => {
   const orders = dao.getUserOrders(req.telegramUser.id);
-  res.json({ orders });
+  const activeOrders = dao.getUserActiveOrders(req.telegramUser.id);
+  res.json({ orders, activeOrders });
 });
 
 // ===== БОТ: Команды и Кнопки =====
@@ -1001,29 +1054,108 @@ bot.action(/real_confirm_(.+)/, async (ctx) => {
 
   const fragmentRes = fulfilled.fragment || { success: false, error: 'Не выполнен' };
   let fragmentNote = '';
+  let replyMarkup;
+  let statusLine;
+
   if (fragmentRes.success) {
+    statusLine = `✅ <b>ПОДТВЕРЖДЁН И ВЫДАН</b> (${escapeHtml(adminName)})`;
     fragmentNote = `\n⚡ <b>Fragment:</b> ${escapeHtml(fragmentRes.message)}`;
     if (fragmentRes.txHash) fragmentNote += `\n🔗 <code>${escapeHtml(fragmentRes.txHash)}</code>`;
+    replyMarkup = {
+      inline_keyboard: [[{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]]
+    };
   } else {
-    fragmentNote = `\n⚠️ <b>Fragment:</b> ${escapeHtml(fragmentRes.error)} (требуется ручная выдача)`;
+    statusLine = `⏳ <b>ОПЛАТА ПОДТВЕРЖДЕНА, ОЖИДАЕТ ВЫДАЧИ</b> (${escapeHtml(adminName)})`;
+    fragmentNote = `\n⚠️ <b>Fragment:</b> ${escapeHtml(fragmentRes.error)}`;
+    replyMarkup = {
+      inline_keyboard: [[
+        { text: '🔄 Повторить Fragment', callback_data: `retry_frag_${orderId}` },
+        { text: '✅ Выдано вручную', callback_data: `manual_done_${orderId}` }
+      ]]
+    };
   }
 
   try {
     const originalText = ctx.callbackQuery.message.text || '';
     await ctx.editMessageText(
-      originalText + `\n\n✅ <b>ПОДТВЕРЖДЁН И ВЫДАН</b> (${escapeHtml(adminName)})${fragmentNote}`,
-      {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]
-          ]
-        }
-      }
+      originalText + `\n\n${statusLine}${fragmentNote}`,
+      { parse_mode: 'HTML', reply_markup: replyMarkup }
     );
   } catch (e) {
     console.warn('Ошибка обновления сообщения заказа:', e.message);
   }
+});
+
+// 4.1 Повторная попытка отправки через Fragment (когда пополнили TON)
+bot.action(/retry_frag_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+
+  const orderId = ctx.match[1];
+  const order = dao.getOrder(orderId);
+  if (!order) return ctx.answerCbQuery('Заказ не найден');
+  if (order.status === 'confirmed') {
+    await ctx.answerCbQuery('Заказ уже выполнен');
+    try {
+      await ctx.editMessageReplyMarkup({
+        inline_keyboard: [[{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]]
+      });
+    } catch (e) {}
+    return;
+  }
+
+  await ctx.answerCbQuery('Пробуем отправить через Fragment...');
+  const adminName = ctx.from.username ? '@' + ctx.from.username : ctx.from.first_name;
+  const fulfilled = await fulfillOrder(orderId, {
+    confirmedBy: adminName,
+    source: 'retry',
+    skipGroupNotice: true
+  });
+
+  const fragmentRes = fulfilled.fragment || { success: false, error: 'Ошибка отправки' };
+  if (fragmentRes.success) {
+    try {
+      const originalText = ctx.callbackQuery.message.text || '';
+      await ctx.editMessageText(
+        originalText + `\n\n✅ <b>ВЫДАН ЧЕРЕЗ FRAGMENT</b> (${escapeHtml(adminName)})\n⚡ ${escapeHtml(fragmentRes.message)}` +
+        (fragmentRes.txHash ? `\n🔗 <code>${escapeHtml(fragmentRes.txHash)}</code>` : ''),
+        {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]] }
+        }
+      );
+    } catch (e) {}
+  } else {
+    try {
+      await ctx.reply(`⚠️ Заказ <b>#${escapeHtml(orderId)}</b> пока не отправлен: ${escapeHtml(fragmentRes.error)}`, { parse_mode: 'HTML' });
+    } catch (e) {}
+  }
+});
+
+// 4.2 Отметка ручной выдачи (если админ выдал сам через fragment.com / Telegram)
+bot.action(/manual_done_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+
+  const orderId = ctx.match[1];
+  const adminName = ctx.from.username ? '@' + ctx.from.username : ctx.from.first_name;
+  const doneRes = await completeOrderManually(orderId);
+
+  if (!doneRes.ok) {
+    return ctx.answerCbQuery(doneRes.reason === 'already_confirmed' ? 'Уже выполнен' : 'Заказ не найден');
+  }
+
+  await ctx.answerCbQuery('Отмечено как выданное!');
+  try {
+    const originalText = ctx.callbackQuery.message.text || '';
+    await ctx.editMessageText(
+      originalText + `\n\n✅ <b>ВЫДАНО ВРУЧНУЮ</b> (${escapeHtml(adminName)})`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]] }
+      }
+    );
+  } catch (e) {}
 });
 
 // 5. Окончательное отклонение

@@ -381,18 +381,30 @@ const dao = {
     }).slice(0, limit);
   },
 
+  getUserActiveOrders(telegramId) {
+    return queryAll(`
+      SELECT * FROM orders
+      WHERE telegram_id = ? AND status IN ('pending', 'paid_processing')
+      ORDER BY CASE WHEN status = 'paid_processing' THEN 0 ELSE 1 END, created_at DESC
+    `, [telegramId]);
+  },
+
   getAllOrders(limit = 50) {
     return queryAll('SELECT * FROM orders ORDER BY created_at DESC LIMIT ?', [limit]);
   },
 
   getPendingOrders() {
-    return queryAll("SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC");
+    return queryAll(`
+      SELECT * FROM orders
+      WHERE status IN ('pending', 'paid_processing')
+      ORDER BY CASE WHEN status = 'paid_processing' THEN 0 ELSE 1 END, created_at DESC
+    `);
   },
 
   getStats() {
     const totalOrders = queryOne("SELECT COUNT(*) as count FROM orders WHERE status != 'awaiting_payment'") || { count: 0 };
-    const pendingOrders = queryOne("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'") || { count: 0 };
-    const confirmedOrders = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(price_uzs), 0) as total FROM orders WHERE status = 'confirmed'") || { count: 0, total: 0 };
+    const pendingOrders = queryOne("SELECT COUNT(*) as count FROM orders WHERE status IN ('pending', 'paid_processing')") || { count: 0 };
+    const confirmedOrders = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(price_uzs), 0) as total FROM orders WHERE status IN ('confirmed', 'paid_processing')") || { count: 0, total: 0 };
     return {
       total: totalOrders.count,
       pending: pendingOrders.count,

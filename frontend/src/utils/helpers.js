@@ -64,12 +64,14 @@ const Helpers = (() => {
     switch (status) {
       case 'confirmed':
         return '<span class="status-badge-clean confirmed">Выполнен</span>';
+      case 'paid_processing':
+        return '<span class="status-badge-clean processing">Оплачен · Выдаётся</span>';
       case 'rejected':
         return '<span class="status-badge-clean rejected">Отклонён</span>';
       case 'awaiting_payment':
         return '<span class="status-badge-clean pending">Ожидает оплаты</span>';
       default:
-        return '<span class="status-badge-clean pending">В обработке</span>';
+        return '<span class="status-badge-clean pending">Проверяется</span>';
     }
   }
 

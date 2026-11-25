@@ -58,13 +58,14 @@ async function initApp() {
     }
   }
 
-  // Проверяем статус администратора
+  // Проверяем статус администратора и активные заказы пользователя
   try {
     const userData = await API.getUser();
     if (userData.isAdmin || currentTgId === 5379376281) {
       const adminBtn = document.getElementById('adminTabBtn');
       if (adminBtn) adminBtn.style.display = 'flex';
     }
+    renderActiveOrderBanner(userData.activeOrders || []);
   } catch (e) {
     if (currentTgId === 5379376281) {
       const adminBtn = document.getElementById('adminTabBtn');
@@ -291,20 +292,101 @@ function stopOrderStatusPolling() {
   }
 }
 
+function escapeHtmlSafe(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderActiveOrderBanner(activeOrders) {
+  const banner = document.getElementById('activeOrderBanner');
+  if (!banner) return;
+
+  const list = Array.isArray(activeOrders) ? activeOrders : [];
+  if (list.length === 0) {
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+    return;
+  }
+
+  // Приоритет отдаём заказам, по которым оплата уже точно получена ('paid_processing')
+  const top = list[0];
+  const itemDesc = top.type === 'stars' ? `${top.amount} ★` : `Premium ${top.amount} мес.`;
+  const extraCount = list.length > 1 ? ` <span style="opacity:0.7;">(+ ещё ${list.length - 1})</span>` : '';
+  const isPaid = top.status === 'paid_processing';
+
+  banner.className = `active-order-banner ${isPaid ? 'state-paid' : 'state-pending'}`;
+  banner.style.display = 'block';
+
+  if (isPaid) {
+    banner.innerHTML = `
+      <div class="active-banner-top">
+        <div class="active-banner-title">
+          <span class="banner-pulse-dot"></span>
+          <span>Оплата получена · Заказ #${escapeHtmlSafe(top.id)}${extraCount}</span>
+        </div>
+        <span class="active-banner-link">Открыть ›</span>
+      </div>
+      <div class="active-banner-desc">
+        Платёж принят! Администратор уже оформляет <strong>${escapeHtmlSafe(itemDesc)}</strong> для <strong>${escapeHtmlSafe(top.recipient_username)}</strong>. Скоро заказ будет отправлен — ожидайте!
+      </div>
+    `;
+  } else {
+    banner.innerHTML = `
+      <div class="active-banner-top">
+        <div class="active-banner-title">
+          <span class="banner-pulse-dot"></span>
+          <span>Заказ #${escapeHtmlSafe(top.id)} в работе${extraCount}</span>
+        </div>
+        <span class="active-banner-link">Открыть ›</span>
+      </div>
+      <div class="active-banner-desc">
+        Проверяем поступление оплаты за <strong>${escapeHtmlSafe(itemDesc)}</strong> (${escapeHtmlSafe(top.recipient_username)}). Как только подтвердится, заказ будет отправлен — ожидайте!
+      </div>
+    `;
+  }
+}
+
+async function refreshActiveBannerFromServer() {
+  try {
+    const userData = await API.getUser();
+    renderActiveOrderBanner(userData.activeOrders || []);
+  } catch (e) {}
+}
+
+let lastPolledStatus = '';
+
 function startOrderStatusPolling(orderId) {
   stopOrderStatusPolling();
+  lastPolledStatus = '';
   orderPollTimer = setInterval(async () => {
     try {
       const st = await API.getOrderStatus(orderId);
-      if (st && st.status === 'confirmed') {
+      if (!st || st.status === lastPolledStatus) return;
+
+      if (st.status === 'confirmed') {
+        lastPolledStatus = 'confirmed';
         stopOrderStatusPolling();
         showSuccessState({
           id: st.id,
           itemDescription: pendingOrder?.itemDesc || 'Ваш заказ',
           recipientUsername: pendingOrder?.recipient || '',
           priceUzs: st.priceUzs || pendingOrder?.priceUzs || 0,
-          autoConfirmed: true
+          deliveryState: 'confirmed'
         });
+        refreshActiveBannerFromServer();
+      } else if (st.status === 'paid_processing') {
+        lastPolledStatus = 'paid_processing';
+        showSuccessState({
+          id: st.id,
+          itemDescription: pendingOrder?.itemDesc || 'Ваш заказ',
+          recipientUsername: pendingOrder?.recipient || '',
+          priceUzs: st.priceUzs || pendingOrder?.priceUzs || 0,
+          deliveryState: 'paid_processing'
+        });
+        refreshActiveBannerFromServer();
       }
     } catch (e) {
       // Тихо игнорируем временный сетевой сбой поллинга
@@ -312,7 +394,7 @@ function startOrderStatusPolling(orderId) {
   }, 3500);
 }
 
-function showSuccessState({ id, itemDescription, recipientUsername, priceUzs, autoConfirmed }) {
+function showSuccessState({ id, itemDescription, recipientUsername, priceUzs, deliveryState, autoConfirmed }) {
   const checkoutModal = document.getElementById('checkoutModal');
   if (checkoutModal) checkoutModal.classList.remove('show');
 
@@ -325,18 +407,26 @@ function showSuccessState({ id, itemDescription, recipientUsername, priceUzs, au
   const descEl = document.getElementById('successDescription');
   const noticeEl = document.getElementById('successNotice');
 
-  if (autoConfirmed) {
+  const state = deliveryState || (autoConfirmed ? 'confirmed' : 'pending');
+
+  if (state === 'confirmed') {
     if (titleEl) titleEl.textContent = '✅ Оплата получена! Заказ выполнен';
     if (descEl) {
-      descEl.innerHTML = `Заказ <span class="order-mono-id">#${id}</span> подтверждён автоматически — товар отправлен!`;
+      descEl.innerHTML = `Заказ <span class="order-mono-id">#${escapeHtmlSafe(id)}</span> подтверждён автоматически — товар отправлен!`;
     }
     if (noticeEl) noticeEl.textContent = 'Чек и статус уже отправлены вам в чат бота.';
-  } else {
-    if (titleEl) titleEl.textContent = 'Заказ передан на проверку';
+  } else if (state === 'paid_processing') {
+    if (titleEl) titleEl.textContent = '✅ Оплата получена! Заказ выполняется';
     if (descEl) {
-      descEl.innerHTML = `Номер заказа <span class="order-mono-id">#${id}</span>. Оплата проверяется автоматически.`;
+      descEl.innerHTML = `Платёж по заказу <span class="order-mono-id">#${escapeHtmlSafe(id)}</span> принят. Администратор уже оформляет отправку — ожидайте!`;
     }
-    if (noticeEl) noticeEl.textContent = 'Как только поступление отобразится в CardXabar, заказ выполнится сам.';
+    if (noticeEl) noticeEl.textContent = 'Если администратор сейчас занят, отправка может занять немного времени. Статус всегда виден сверху в магазине.';
+  } else {
+    if (titleEl) titleEl.textContent = '⏳ Заказ передан на проверку';
+    if (descEl) {
+      descEl.innerHTML = `Номер заказа <span class="order-mono-id">#${escapeHtmlSafe(id)}</span>. Оплата проверяется, администратор скоро выдаст заказ.`;
+    }
+    if (noticeEl) noticeEl.textContent = 'Как только поступление подтвердится, товар будет отправлен, а статус обновится сверху.';
   }
 
   const successModal = document.getElementById('successModal');
@@ -391,16 +481,18 @@ async function submitPayment() {
       });
     }
 
-    const isConfirmed = Boolean(res.alreadyConfirmed || res.order?.status === 'confirmed');
+    const status = res.alreadyConfirmed ? 'confirmed' : (res.order?.status || 'pending');
     showSuccessState({
       id: res.order.id,
       itemDescription: res.order.itemDescription,
       recipientUsername: res.order.recipientUsername,
       priceUzs: res.order.priceUzs,
-      autoConfirmed: isConfirmed
+      deliveryState: status
     });
 
-    if (!isConfirmed && pendingOrder.autoConfirm) {
+    refreshActiveBannerFromServer();
+
+    if (status !== 'confirmed' && pendingOrder.autoConfirm) {
       startOrderStatusPolling(res.order.id);
     } else {
       stopOrderStatusPolling();
@@ -463,6 +555,7 @@ async function loadOrders() {
   try {
     const data = await API.getOrders();
     const orders = data.orders || [];
+    renderActiveOrderBanner(data.activeOrders || []);
 
     if (orders.length === 0) {
       container.innerHTML = `
@@ -589,6 +682,29 @@ async function loadAdminInfo() {
       } else {
         pendingContainer.innerHTML = pendingOrders.map(o => {
           const itemDesc = o.type === 'stars' ? `${o.amount} Stars` : `Premium ${o.amount} мес.`;
+          const safeRec = escapeHtmlSafe(o.recipient_username);
+          const safeBuyer = escapeHtmlSafe(o.buyer_username);
+          const safeComment = escapeHtmlSafe(o.sender_comment);
+          const isPaidProc = o.status === 'paid_processing';
+
+          const actionsHtml = isPaidProc
+            ? `
+              <button class="action-btn-confirm" onclick="promptAdminOrder('${o.id}', 'retry', '${safeRec}', '${itemDesc}')">
+                🔄 Повторить Fragment
+              </button>
+              <button class="action-btn-confirm" style="background:var(--ok); color:#052e16;" onclick="promptAdminOrder('${o.id}', 'manual_done', '${safeRec}', '${itemDesc}')">
+                ✅ Выдал вручную
+              </button>
+            `
+            : `
+              <button class="action-btn-confirm" onclick="promptAdminOrder('${o.id}', 'confirm', '${safeRec}', '${itemDesc}')">
+                Подтвердить
+              </button>
+              <button class="action-btn-reject" onclick="promptAdminOrder('${o.id}', 'reject', '${safeRec}', '${itemDesc}')">
+                Отклонить
+              </button>
+            `;
+
           return `
             <div class="admin-order-card" id="admin-order-${o.id}">
               <div class="order-top">
@@ -606,21 +722,16 @@ async function loadAdminInfo() {
                 </div>
                 <div>
                   <span class="order-field-label">Получатель</span>
-                  <div class="order-field-val text-accent">${o.recipient_username}</div>
+                  <div class="order-field-val text-accent">${safeRec}</div>
                 </div>
                 <div>
                   <span class="order-field-label">Покупатель</span>
-                  <div class="order-field-val">${o.buyer_username}</div>
+                  <div class="order-field-val">${safeBuyer}</div>
                 </div>
               </div>
-              ${o.sender_comment ? `<div class="order-field-label">Чек: <span style="color:#fff">${o.sender_comment}</span></div>` : ''}
+              ${safeComment ? `<div class="order-field-label">Чек: <span style="color:#fff">${safeComment}</span></div>` : ''}
               <div class="admin-actions-row" id="actions-row-${o.id}">
-                <button class="action-btn-confirm" onclick="promptAdminOrder('${o.id}', 'confirm', '${o.recipient_username}', '${itemDesc}')">
-                  Подтвердить
-                </button>
-                <button class="action-btn-reject" onclick="promptAdminOrder('${o.id}', 'reject', '${o.recipient_username}', '${itemDesc}')">
-                  Отклонить
-                </button>
+                ${actionsHtml}
               </div>
             </div>
           `;
@@ -1054,10 +1165,14 @@ async function saveAdminSettings() {
 function promptAdminOrder(orderId, action, recipient, itemDesc) {
   Helpers.haptic('warning');
 
-  const isConfirm = action === 'confirm';
-  const msg = isConfirm
-    ? `Вы уверены? Подтвердить заказ #${orderId} и отправить ${itemDesc} на ${recipient}?`
-    : `Вы уверены, что хотите отклонить заказ #${orderId}?`;
+  const isReject = action === 'reject';
+  const msg = action === 'retry'
+    ? `Повторить автовыдачу заказа #${orderId} (${itemDesc} на ${recipient}) через Fragment?`
+    : action === 'manual_done'
+      ? `Отметить заказ #${orderId} как уже выданный вручную? Клиенту уйдёт уведомление об успехе.`
+      : action === 'confirm'
+        ? `Вы уверены? Подтвердить заказ #${orderId} и отправить ${itemDesc} на ${recipient}?`
+        : `Вы уверены, что хотите отклонить заказ #${orderId}?`;
 
   if (tg && typeof tg.showConfirm === 'function') {
     tg.showConfirm(msg, (confirmed) => {
@@ -1066,12 +1181,18 @@ function promptAdminOrder(orderId, action, recipient, itemDesc) {
       }
     });
   } else {
-    // Встроенные кнопки двойного подтверждения (для браузера / fallback)
     const row = document.getElementById(`actions-row-${orderId}`);
     if (row) {
+      const btnText = action === 'retry'
+        ? '🔄 Да, повторить Fragment'
+        : action === 'manual_done'
+          ? '✅ Да, выдано вручную'
+          : action === 'confirm'
+            ? '⚡ Да, точно выдать'
+            : '❌ Да, точно отклонить';
       row.innerHTML = `
-        <button class="${isConfirm ? 'action-btn-confirm' : 'action-btn-reject'}" style="font-weight:700;" onclick="handleAdminOrder('${orderId}', '${action}')">
-          ${isConfirm ? '⚡ Да, точно выдать' : '❌ Да, точно отклонить'}
+        <button class="${isReject ? 'action-btn-reject' : 'action-btn-confirm'}" style="font-weight:700;" onclick="handleAdminOrder('${orderId}', '${action}')">
+          ${btnText}
         </button>
         <button class="action-btn-reject" style="background:#1e293b; color:#94a3b8;" onclick="loadAdminInfo()">
           Отмена
@@ -1087,19 +1208,21 @@ async function handleAdminOrder(orderId, action) {
   try {
     const res = await API.adminOrderAction(orderId, action);
     Helpers.haptic('success');
-    
-    if (action === 'confirm' && res.fragment) {
+
+    if ((action === 'confirm' || action === 'retry') && res.fragment) {
       if (res.fragment.success) {
-        Helpers.showToast(`Выдано через Fragment (${res.fragment.mode})`);
+        Helpers.showToast(`✅ Выдано через Fragment!`);
       } else {
-        Helpers.showToast(`Подтверждено (Fragment: ${res.fragment.error})`);
+        Helpers.showToast(`⏳ Оплата есть, но Fragment: ${res.fragment.error}`);
       }
+    } else if (action === 'manual_done') {
+      Helpers.showToast('✅ Заказ отмечен как выполненный');
     } else {
-      Helpers.showToast(action === 'confirm' ? 'Заказ подтверждён' : 'Заказ отклонён');
+      Helpers.showToast(action === 'reject' ? 'Заказ отклонён' : 'Готово');
     }
-    
-    // Перезагружаем список
+
     loadAdminInfo();
+    refreshActiveBannerFromServer();
   } catch (err) {
     Helpers.haptic('error');
     Helpers.showToast(err.message || 'Ошибка выполнения действия');
