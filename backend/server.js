@@ -784,29 +784,65 @@ app.get('/api/orders', auth, (req, res) => {
 // ===== БОТ: Команды и Кнопки =====
 
 // Команда /start
-bot.start((ctx) => {
+bot.start(async (ctx) => {
   const urlToUse = WEBAPP_URL || `http://localhost:${PORT}`;
   const userNick = ctx.from?.username
     ? '@' + ctx.from.username
     : (ctx.from?.first_name || 'друг');
 
-  ctx.reply(
-    `Привет, <b>${escapeHtml(userNick)}</b>! 👋\n\n` +
-    `Здесь вы можете быстро приобрести <b>Telegram Stars</b> и <b>Premium</b> подписку на свой аккаунт за сумы.\n\n` +
-    `⚡ Доставка за пару секунд\n` +
-    `💳 Оплата в сумах (Uzcard / Humo) без переплат App Store\n` +
-    `🛡 Без входа в аккаунт и паролей — отправка подарком по @username\n` +
-    `🤖 Автоматическое подтверждение и выдача 24/7\n\n` +
-    `Нажмите кнопку ниже, чтобы открыть магазин:`,
-    {
+  const buildWelcomeText = (useCustomEmoji) => {
+    const e = (id, customFallback, plainFallback) =>
+      useCustomEmoji ? `<tg-emoji emoji-id="${id}">${customFallback}</tg-emoji>` : plainFallback;
+
+    return (
+      `Привет, <b>${escapeHtml(userNick)}</b>! ${e('5226775277094347795', '👋', '👋')}\n\n` +
+      `Здесь вы можете быстро приобрести <b>Telegram Stars</b> и <b>Premium</b> подписку на свой аккаунт за сумы.\n\n` +
+      `${e('5226842102490501226', '🚀', '⚡')} Доставка за пару секунд\n` +
+      `${e('5226925669669183044', '🪪', '💳')} Оплата в сумах (Uzcard / Humo)\n` +
+      `${e('5226950683558712654', '🔓', '🛡')} Без входа в аккаунт и паролей — отправка подарком по @username\n` +
+      `${e('5226727293719712131', '🤖', '🤖')} Автоматическое подтверждение и выдача 24/7\n\n` +
+      `Нажмите кнопку ниже, чтобы открыть магазин:`
+    );
+  };
+
+  try {
+    await ctx.reply(buildWelcomeText(true), {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [{ text: '⭐ Открыть Nate Stars', web_app: { url: urlToUse } }]
+          [{
+            text: 'Открыть Nate Stars',
+            web_app: { url: urlToUse },
+            icon_custom_emoji_id: '5226753840912570607'
+          }]
         ]
       }
+    });
+  } catch (err) {
+    if (err?.response?.error_code && err.response.error_code !== 400) throw err;
+    console.warn('Custom emoji /start reply with button icon failed, retrying without button icon:', err.message);
+    try {
+      await ctx.reply(buildWelcomeText(true), {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⭐ Открыть Nate Stars', web_app: { url: urlToUse } }]
+          ]
+        }
+      });
+    } catch (fallbackErr) {
+      if (fallbackErr?.response?.error_code && fallbackErr.response.error_code !== 400) throw fallbackErr;
+      console.warn('Custom emoji /start text failed, sending plain fallback:', fallbackErr.message);
+      await ctx.reply(buildWelcomeText(false), {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⭐ Открыть Nate Stars', web_app: { url: urlToUse } }]
+          ]
+        }
+      });
     }
-  );
+  }
 });
 
 // Команда /setgroup — Привязка группы для получения заказов
