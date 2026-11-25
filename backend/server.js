@@ -783,10 +783,6 @@ app.get('/api/orders', auth, (req, res) => {
 
 // ===== БОТ: Команды и Кнопки =====
 
-// Кэш проверки доступности кастомных премиум-эмодзи у бота (требует Fragment-юзернейм или Premium у владельца бота)
-let customEmojiCache = { supported: null, checkedAt: 0 };
-const CUSTOM_EMOJI_RECHECK_MS = 10 * 60 * 1000;
-
 // Команда /start
 bot.start(async (ctx) => {
   const urlToUse = WEBAPP_URL || `http://localhost:${PORT}`;
@@ -794,61 +790,23 @@ bot.start(async (ctx) => {
     ? '@' + ctx.from.username
     : (ctx.from?.first_name || 'друг');
 
-  const buildWelcomePayload = (useCustomEmoji) => {
-    const e = (id, customFallback, plainFallback) =>
-      useCustomEmoji ? `<tg-emoji emoji-id="${id}">${customFallback}</tg-emoji>` : plainFallback;
+  const welcomeText =
+    `Привет, <b>${escapeHtml(userNick)}</b>! <tg-emoji emoji-id="5226775277094347795">👋</tg-emoji>\n\n` +
+    `Здесь вы можете быстро приобрести <b>Telegram Stars</b> и <b>Premium</b> подписку на свой аккаунт за сумы.\n\n` +
+    `• Доставка за пару секунд\n` +
+    `• Оплата в сумах (Uzcard / Humo)\n` +
+    `• Без входа в аккаунт и паролей — отправка подарком по @username\n` +
+    `• Автоматическое подтверждение и выдача 24/7\n\n` +
+    `Нажмите кнопку ниже, чтобы открыть магазин:`;
 
-    const text =
-      `Привет, <b>${escapeHtml(userNick)}</b>! ${e('5226775277094347795', '👋', '👋')}\n\n` +
-      `Здесь вы можете быстро приобрести <b>Telegram Stars</b> и <b>Premium</b> подписку на свой аккаунт за сумы.\n\n` +
-      `${e('5226842102490501226', '🚀', '⚡')} Доставка за пару секунд\n` +
-      `${e('5226925669669183044', '🪪', '💳')} Оплата в сумах (Uzcard / Humo)\n` +
-      `${e('5226950683558712654', '🔓', '🛡')} Без входа в аккаунт и паролей — отправка подарком по @username\n` +
-      `${e('5226727293719712131', '🤖', '🤖')} Автоматическое подтверждение и выдача 24/7\n\n` +
-      `Нажмите кнопку ниже, чтобы открыть магазин:`;
-
-    const button = useCustomEmoji
-      ? { text: 'Открыть Nate Stars', web_app: { url: urlToUse }, icon_custom_emoji_id: '5226753840912570607' }
-      : { text: '⭐ Открыть Nate Stars', web_app: { url: urlToUse } };
-
-    return {
-      text,
-      extra: {
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: [[button]] }
-      }
-    };
-  };
-
-  const callerIsAdmin = isAdmin(ctx.from?.id);
-  const cacheExpired = (Date.now() - customEmojiCache.checkedAt) > CUSTOM_EMOJI_RECHECK_MS;
-  const shouldTryCustom = callerIsAdmin || customEmojiCache.supported !== false || cacheExpired;
-
-  if (!shouldTryCustom) {
-    const plain = buildWelcomePayload(false);
-    await ctx.reply(plain.text, plain.extra);
-    return;
-  }
-
-  const custom = buildWelcomePayload(true);
-  try {
-    const sent = await ctx.reply(custom.text, custom.extra);
-    const hasCustomEntities = Array.isArray(sent?.entities) && sent.entities.some(ent => ent.type === 'custom_emoji');
-    customEmojiCache = { supported: hasCustomEntities, checkedAt: Date.now() };
-
-    if (!hasCustomEntities) {
-      // Telegram молча вырезал custom_emoji (нет Fragment-юзернейма или активного Premium у владельца бота) —
-      // меняем fallback-символы пака (🚀/🪪/🔓) на корректные обычные эмодзи и возвращаем ⭐ на кнопку
-      const plain = buildWelcomePayload(false);
-      await ctx.telegram.editMessageText(ctx.chat.id, sent.message_id, undefined, plain.text, plain.extra).catch(() => {});
+  await ctx.reply(welcomeText, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: 'Открыть Nate Stars', web_app: { url: urlToUse } }]
+      ]
     }
-  } catch (err) {
-    if (err?.response?.error_code && err.response.error_code !== 400) throw err;
-    console.warn('Custom emoji /start failed, sending plain fallback:', err.message);
-    customEmojiCache = { supported: false, checkedAt: Date.now() };
-    const plain = buildWelcomePayload(false);
-    await ctx.reply(plain.text, plain.extra);
-  }
+  });
 });
 
 // Команда /setgroup — Привязка группы для получения заказов
