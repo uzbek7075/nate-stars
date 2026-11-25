@@ -66,9 +66,27 @@ const Helpers = (() => {
         return '<span class="status-badge-clean confirmed">Выполнен</span>';
       case 'rejected':
         return '<span class="status-badge-clean rejected">Отклонён</span>';
+      case 'awaiting_payment':
+        return '<span class="status-badge-clean pending">Ожидает оплаты</span>';
       default:
         return '<span class="status-badge-clean pending">В обработке</span>';
     }
+  }
+
+  function copyText(text, successMsg = 'Скопировано') {
+    const val = String(text || '');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(val).catch(() => {});
+    } else {
+      const el = document.createElement('textarea');
+      el.value = val;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
+    haptic('success');
+    showToast(successMsg);
   }
 
   // Показать toast-уведомление
@@ -100,5 +118,5 @@ const Helpers = (() => {
     }
   }
 
-  return { formatUzs, formatDate, formatCardNumber, statusBadge, showToast, haptic };
+  return { formatUzs, formatDate, formatCardNumber, statusBadge, showToast, haptic, copyText };
 })();

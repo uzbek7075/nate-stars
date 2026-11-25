@@ -49,7 +49,28 @@ const API = (() => {
       return request('/api/user');
     },
 
-    // Создать заказ на перевод
+    // Подготовить заказ (зарезервировать точную сумму с «копейками»)
+    prepareOrder(orderData) {
+      return request('/api/orders/prepare', {
+        method: 'POST',
+        body: JSON.stringify(orderData)
+      });
+    },
+
+    // Отметить оплату («Я оплатил»)
+    markOrderPaid(orderId, senderComment) {
+      return request(`/api/orders/${encodeURIComponent(orderId)}/paid`, {
+        method: 'POST',
+        body: JSON.stringify({ senderComment })
+      });
+    },
+
+    // Проверить статус оплаты заказа (live polling)
+    getOrderStatus(orderId) {
+      return request(`/api/orders/${encodeURIComponent(orderId)}/status`);
+    },
+
+    // Создать заказ на перевод (fallback)
     createOrder(orderData) {
       return request('/api/create-order', {
         method: 'POST',
@@ -94,6 +115,49 @@ const API = (() => {
     // Админ-панель: сгенерировать чистый кошелёк TON (24 слова)
     generateTonWallet() {
       return request('/api/admin/generate-wallet', {
+        method: 'POST'
+      });
+    },
+
+    // Админ-панель: CardXabar (автоподтверждение платежей)
+    getCardXabarStatus() {
+      return request('/api/admin/cardxabar/status');
+    },
+
+    exportCardXabarSession() {
+      return request('/api/admin/cardxabar/export');
+    },
+
+    cardXabarAuthPhone(data) {
+      return request('/api/admin/cardxabar/auth-phone', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+
+    cardXabarAuthCode(code) {
+      return request('/api/admin/cardxabar/auth-code', {
+        method: 'POST',
+        body: JSON.stringify({ code })
+      });
+    },
+
+    cardXabarAuthQr(data) {
+      return request('/api/admin/cardxabar/auth-qr', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+    },
+
+    cardXabarAuthPassword(password) {
+      return request('/api/admin/cardxabar/auth-password', {
+        method: 'POST',
+        body: JSON.stringify({ password })
+      });
+    },
+
+    cardXabarDisconnect() {
+      return request('/api/admin/cardxabar/disconnect', {
         method: 'POST'
       });
     }

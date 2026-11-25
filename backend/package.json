@@ -13,8 +13,10 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "localtunnel": "^2.0.2",
+    "qrcode": "^1.5.4",
     "sql.js": "^1.11.0",
     "telegraf": "^4.16.3",
+    "telegram": "^2.26.22",
     "untun": "^0.2.2",
     "uuid": "^11.0.0"
   }

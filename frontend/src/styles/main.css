@@ -1522,3 +1522,55 @@ html, body {
   color: var(--text-soft);
   margin-top: 4px;
 }
+
+/* Auto-Confirm CardXabar & Exact Sum Banner */
+.auto-pay-banner {
+  background: rgba(37, 99, 235, 0.14);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.auto-pay-title {
+  font-family: var(--font-display);
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--blue-bright);
+  margin-bottom: 4px;
+}
+
+.auto-pay-text {
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--text-hi);
+}
+
+.cx-connected-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid var(--ok-border);
+  border-radius: var(--r-md);
+}
+
+.cx-logs-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cx-log-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px;
+  background: var(--bg-sunken);
+  border: var(--hairline);
+  border-radius: var(--r-sm);
+  font-size: 0.72rem;
+  color: var(--text-mute);
+}

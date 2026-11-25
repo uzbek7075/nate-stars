@@ -64,11 +64,41 @@ async function initDatabase() {
       type TEXT NOT NULL,
       amount INTEGER NOT NULL,
       price_uzs INTEGER NOT NULL,
+      base_price_uzs INTEGER DEFAULT 0,
       card_number TEXT NOT NULL,
       status TEXT DEFAULT 'pending',
       sender_comment TEXT,
+      payment_source TEXT DEFAULT 'manual',
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Безопасная миграция новых колонок в существующей таблице orders
+  try {
+    const stmt = db.prepare("PRAGMA table_info(orders)");
+    const orderCols = [];
+    while (stmt.step()) orderCols.push(stmt.getAsObject().name);
+    stmt.free();
+    if (!orderCols.includes('base_price_uzs')) {
+      db.run("ALTER TABLE orders ADD COLUMN base_price_uzs INTEGER DEFAULT 0");
+    }
+    if (!orderCols.includes('payment_source')) {
+      db.run("ALTER TABLE orders ADD COLUMN payment_source TEXT DEFAULT 'manual'");
+    }
+  } catch (e) {
+    console.warn('Миграция orders:', e.message);
+  }
+
+  // Таблица обработанных уведомлений CardXabar (защита от двойного срабатывания)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS processed_cardxabar_msgs (
+      msg_id INTEGER PRIMARY KEY,
+      amount REAL NOT NULL,
+      card_last4 TEXT,
+      order_id TEXT,
+      raw_text TEXT,
+      processed_at TEXT DEFAULT (datetime('now'))
     )
   `);
 
@@ -87,7 +117,12 @@ async function initDatabase() {
     'fragment_provider': 'simulation',
     'fragment_api_key': '',
     'fragment_api_url': 'https://starsapi.uz',
-    'ton_wallet_mnemonic': ''
+    'ton_wallet_mnemonic': '',
+    'auto_confirm_enabled': 'false',
+    'tg_api_id': '',
+    'tg_api_hash': '',
+    'tg_session_string': '',
+    'tg_phone': ''
   };
 
   for (const [key, val] of Object.entries(defaultSettings)) {
@@ -95,6 +130,18 @@ async function initDatabase() {
     if (res.length === 0 || res[0].values.length === 0) {
       db.run(`INSERT INTO settings (key, value) VALUES (?, ?)`, [key, val]);
     }
+  }
+
+  // Подхватываем переменные окружения Render для автоподтверждения CardXabar
+  if (process.env.TG_API_ID) {
+    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('tg_api_id', ?)", [String(process.env.TG_API_ID).trim()]);
+  }
+  if (process.env.TG_API_HASH) {
+    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('tg_api_hash', ?)", [String(process.env.TG_API_HASH).trim()]);
+  }
+  if (process.env.TG_SESSION) {
+    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('tg_session_string', ?)", [String(process.env.TG_SESSION).trim()]);
+    db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_confirm_enabled', 'true')");
   }
 
   // Всегда гарантируем актуальные ID владельца и группы
@@ -176,27 +223,162 @@ const dao = {
     return queryOne('SELECT * FROM users WHERE telegram_id = ?', [telegramId]);
   },
 
-  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, cardNumber, senderComment }) {
+  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, basePriceUzs, cardNumber, status, senderComment, paymentSource }) {
     const nowIso = new Date().toISOString();
     runSql(`
-      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, card_number, status, sender_comment, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
-    `, [id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, cardNumber, senderComment || '', nowIso, nowIso]);
+      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, base_price_uzs, card_number, status, sender_comment, payment_source, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      id,
+      telegramId,
+      buyerUsername,
+      recipientUsername,
+      type,
+      amount,
+      priceUzs,
+      basePriceUzs || priceUzs,
+      cardNumber,
+      status || 'pending',
+      senderComment || '',
+      paymentSource || 'manual',
+      nowIso,
+      nowIso
+    ]);
   },
 
   getOrder(id) {
     return queryOne('SELECT * FROM orders WHERE id = ?', [id]);
   },
 
-  updateOrderStatus(id, status) {
+  updateOrderStatus(id, status, paymentSource = null) {
+    const nowIso = new Date().toISOString();
+    if (paymentSource) {
+      runSql(`
+        UPDATE orders SET status = ?, payment_source = ?, updated_at = ? WHERE id = ?
+      `, [status, paymentSource, nowIso, id]);
+    } else {
+      runSql(`
+        UPDATE orders SET status = ?, updated_at = ? WHERE id = ?
+      `, [status, nowIso, id]);
+    }
+  },
+
+  markOrderPaidByUser(id, senderComment) {
     const nowIso = new Date().toISOString();
     runSql(`
-      UPDATE orders SET status = ?, updated_at = ? WHERE id = ?
-    `, [status, nowIso, id]);
+      UPDATE orders
+      SET status = CASE WHEN status = 'awaiting_payment' THEN 'pending' ELSE status END,
+          sender_comment = CASE WHEN ? != '' THEN ? ELSE sender_comment END,
+          updated_at = ?
+      WHERE id = ?
+    `, [senderComment || '', senderComment || '', nowIso, id]);
+  },
+
+  /**
+   * Повторно использует свежий неоплаченный заказ того же клиента (за последние 15 минут),
+   * чтобы при закрытии/повторном открытии окна оплаты не тратились лишние «копейки».
+   */
+  findReusableAwaitingOrder({ telegramId, type, amount, recipientUsername, basePriceUzs }) {
+    const cutoffIso = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const candidates = queryAll(`
+      SELECT * FROM orders
+      WHERE telegram_id = ? AND type = ? AND amount = ? AND recipient_username = ?
+        AND status = 'awaiting_payment'
+      ORDER BY created_at DESC LIMIT 5
+    `, [telegramId, type, amount, recipientUsername]);
+
+    return candidates.find(o =>
+      o.created_at >= cutoffIso &&
+      Number(o.base_price_uzs || o.price_uzs) === Number(basePriceUzs)
+    ) || null;
+  },
+
+  /**
+   * Подбирает уникальную сумму оплаты (базовая цена + 1..99 сум) среди всех активных заказов,
+   * чтобы однозначно определить покупателя по сообщению CardXabar.
+   */
+  allocateUniquePrice(basePriceUzs) {
+    const cutoffIso = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    const activeOrders = queryAll(`
+      SELECT price_uzs, created_at FROM orders
+      WHERE status IN ('awaiting_payment', 'pending')
+    `);
+
+    const usedPrices = new Set();
+    for (const o of activeOrders) {
+      const ts = Date.parse(o.created_at.includes('T') ? o.created_at : o.created_at.replace(' ', 'T') + 'Z');
+      if (!isNaN(ts) && ts >= Date.parse(cutoffIso)) {
+        usedPrices.add(Number(o.price_uzs));
+      }
+    }
+
+    const candidatesPrimary = [];
+    for (let d = 1; d <= 50; d++) {
+      const candidate = basePriceUzs + d;
+      if (!usedPrices.has(candidate)) candidatesPrimary.push(candidate);
+    }
+    if (candidatesPrimary.length > 0) {
+      return candidatesPrimary[Math.floor(Math.random() * candidatesPrimary.length)];
+    }
+
+    for (let d = 51; d <= 250; d++) {
+      const candidate = basePriceUzs + d;
+      if (!usedPrices.has(candidate)) return candidate;
+    }
+    return basePriceUzs + 1;
+  },
+
+  /**
+   * Ищет активный заказ по точной сумме зачисления из CardXabar (созданный до поступления платежа).
+   */
+  findOrderForCardXabarPayment(receivedAmount, msgDateMs) {
+    const cutoffMs = Date.now() - 120 * 60 * 1000;
+    const candidates = queryAll(`
+      SELECT * FROM orders
+      WHERE status IN ('awaiting_payment', 'pending')
+      ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC
+    `);
+
+    const target = Number(receivedAmount);
+    for (const o of candidates) {
+      const createdStr = o.created_at.includes('T') ? o.created_at : o.created_at.replace(' ', 'T') + 'Z';
+      const createdMs = Date.parse(createdStr);
+      if (isNaN(createdMs) || createdMs < cutoffMs) continue;
+      // Платёж должен поступить не раньше создания заказа (допуск 2 минуты на рассинхрон часов)
+      if (msgDateMs && createdMs > msgDateMs + 120 * 1000) continue;
+
+      if (Math.abs(Number(o.price_uzs) - target) < 0.01) {
+        return o;
+      }
+    }
+    return null;
+  },
+
+  isCardXabarMsgProcessed(msgId) {
+    const row = queryOne('SELECT msg_id FROM processed_cardxabar_msgs WHERE msg_id = ?', [Number(msgId)]);
+    return Boolean(row);
+  },
+
+  markCardXabarMsgProcessed(msgId, amount, cardLast4, orderId, rawText) {
+    const nowIso = new Date().toISOString();
+    runSql(`
+      INSERT OR REPLACE INTO processed_cardxabar_msgs (msg_id, amount, card_last4, order_id, raw_text, processed_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [Number(msgId), Number(amount), cardLast4 || '', orderId || '', rawText || '', nowIso]);
+  },
+
+  getRecentCardXabarLogs(limit = 10) {
+    return queryAll('SELECT * FROM processed_cardxabar_msgs ORDER BY processed_at DESC LIMIT ?', [limit]);
   },
 
   getUserOrders(telegramId, limit = 20) {
-    return queryAll('SELECT * FROM orders WHERE telegram_id = ? ORDER BY created_at DESC LIMIT ?', [telegramId, limit]);
+    const rows = queryAll('SELECT * FROM orders WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 40', [telegramId]);
+    const cutoffMs = Date.now() - 30 * 60 * 1000;
+    return rows.filter(o => {
+      if (o.status !== 'awaiting_payment') return true;
+      const createdStr = o.created_at.includes('T') ? o.created_at : o.created_at.replace(' ', 'T') + 'Z';
+      return Date.parse(createdStr) >= cutoffMs;
+    }).slice(0, limit);
   },
 
   getAllOrders(limit = 50) {
@@ -208,7 +390,7 @@ const dao = {
   },
 
   getStats() {
-    const totalOrders = queryOne('SELECT COUNT(*) as count FROM orders') || { count: 0 };
+    const totalOrders = queryOne("SELECT COUNT(*) as count FROM orders WHERE status != 'awaiting_payment'") || { count: 0 };
     const pendingOrders = queryOne("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'") || { count: 0 };
     const confirmedOrders = queryOne("SELECT COUNT(*) as count, COALESCE(SUM(price_uzs), 0) as total FROM orders WHERE status = 'confirmed'") || { count: 0, total: 0 };
     return {

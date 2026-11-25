@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const { initDatabase, dao } = require('./database');
 const { authMiddleware } = require('./auth');
 const { FragmentService } = require('./fragment');
+const { CardXabarService } = require('./cardxabar');
 
 // ===== Конфигурация =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -70,6 +71,191 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// ===== Вспомогательные функции заказов и автовыдачи =====
+
+function calculateBasePrice(type, amount, settings) {
+  if (type === 'stars') {
+    const starsCount = Number(amount);
+    const minStars = Number(settings.min_stars || 50);
+    if (isNaN(starsCount) || starsCount < minStars) {
+      throw new Error(`Минимум ${minStars} звёзд`);
+    }
+    const starPrice = Number(settings.star_price_uzs || 220);
+    return {
+      basePriceUzs: starsCount * starPrice,
+      itemDescription: `${starsCount} Telegram Stars`
+    };
+  }
+  if (type === 'premium') {
+    const months = Number(amount);
+    let price = 0;
+    if (months === 3) price = Number(settings.premium_3_uzs || 175000);
+    else if (months === 6) price = Number(settings.premium_6_uzs || 245000);
+    else if (months === 12) price = Number(settings.premium_12_uzs || 395000);
+    else throw new Error('Некорректный срок Premium');
+    return {
+      basePriceUzs: price,
+      itemDescription: `Telegram Premium на ${months} мес.`
+    };
+  }
+  throw new Error('Неизвестный тип товара');
+}
+
+async function sendToAdminAndGroup(htmlMessage, extraOptions = {}) {
+  const ordersChatId = dao.getSetting('orders_chat_id');
+  if (ordersChatId) {
+    try {
+      await bot.telegram.sendMessage(ordersChatId, htmlMessage, {
+        parse_mode: 'HTML',
+        ...extraOptions
+      });
+    } catch (err) {
+      console.warn('Ошибка отправки в группу заказов:', err.message);
+    }
+  }
+
+  const admins = getAdminIds();
+  for (const adminId of admins) {
+    if (String(adminId) === String(ordersChatId)) continue;
+    try {
+      await bot.telegram.sendMessage(adminId, htmlMessage, {
+        parse_mode: 'HTML',
+        ...extraOptions
+      });
+    } catch (err) {
+      console.warn(`Не удалось отправить админу ${adminId}:`, err.message);
+    }
+  }
+}
+
+async function notifyAdminsOfPendingOrder(order) {
+  const itemDesc = order.type === 'stars'
+    ? `${order.amount} Telegram Stars`
+    : `Telegram Premium на ${order.amount} мес.`;
+
+  const adminMessage =
+    `<b>НОВЫЙ ЗАКАЗ #${escapeHtml(order.id)}</b>\n\n` +
+    `• <b>Покупатель:</b> ${escapeHtml(order.buyer_username)} (ID: <code>${order.telegram_id}</code>)\n` +
+    `• <b>Получатель:</b> ${escapeHtml(order.recipient_username)}\n` +
+    `• <b>Товар:</b> ${escapeHtml(itemDesc)}\n` +
+    `• <b>Сумма:</b> <code>${formatUzs(order.price_uzs)}</code>\n` +
+    `• <b>Карта оплаты:</b> <code>${escapeHtml(order.card_number)}</code>\n` +
+    (order.sender_comment ? `• <b>Чек / отправитель:</b> ${escapeHtml(order.sender_comment)}\n` : '') +
+    `\n<i>Статус: ожидает проверки платежа</i>`;
+
+  await sendToAdminAndGroup(adminMessage, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '✅ Подтвердить', callback_data: `pre_confirm_${order.id}` },
+          { text: '❌ Отклонить', callback_data: `pre_reject_${order.id}` }
+        ]
+      ]
+    }
+  });
+}
+
+/**
+ * Единая точка выполнения заказа (подтверждение + отправка через Fragment + уведомления).
+ * Используется вручную из админки/группы и автоматически при срабатывании CardXabar.
+ */
+async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual', cardXabarInfo = null, skipGroupNotice = false } = {}) {
+  const order = dao.getOrder(orderId);
+  if (!order) return { ok: false, reason: 'not_found' };
+  if (order.status === 'confirmed') return { ok: false, reason: 'already_confirmed', order };
+
+  dao.updateOrderStatus(orderId, 'confirmed', source);
+
+  const fragmentRes = await FragmentService.dispatchOrder(order);
+  console.log(`⚡ [Order Fulfill #${orderId} via ${source}]`, fragmentRes);
+
+  const itemDesc = order.type === 'stars'
+    ? `${order.amount} Telegram Stars`
+    : `Telegram Premium на ${order.amount} мес.`;
+
+  const clientMsg = fragmentRes.success
+    ? `<b>Заказ #${escapeHtml(order.id)} выполнен</b>\n\n` +
+      `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
+      `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
+      `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
+      `Товар успешно доставлен на указанный аккаунт. Спасибо за покупку в Nate Stars.`
+    : `<b>Оплата по заказу #${escapeHtml(order.id)} подтверждена</b>\n\n` +
+      `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
+      `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
+      `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
+      `Заказ передан на выдачу и скоро поступит на указанный аккаунт.`;
+
+  try {
+    await bot.telegram.sendMessage(order.telegram_id, clientMsg, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.warn('Не удалось уведомить клиента:', e.message);
+  }
+
+  if (!skipGroupNotice) {
+    let fragmentNote = '';
+    if (fragmentRes.success) {
+      fragmentNote = `⚡ <b>Fragment:</b> ${escapeHtml(fragmentRes.message)}`;
+      if (fragmentRes.txHash) fragmentNote += `\n🔗 <code>${escapeHtml(fragmentRes.txHash)}</code>`;
+    } else {
+      fragmentNote = `⚠️ <b>Fragment:</b> ${escapeHtml(fragmentRes.error)}`;
+    }
+
+    const header = source === 'cardxabar'
+      ? `⚡ <b>АВТООПЛАТА CARDXABAR (#${escapeHtml(order.id)})</b>`
+      : `✅ <b>ЗАКАЗ #${escapeHtml(order.id)} ПОДТВЕРЖДЁН</b> (${escapeHtml(confirmedBy)})`;
+
+    const cardLine = cardXabarInfo
+      ? `💳 Зачислено: <code>+${formatUzs(cardXabarInfo.amount)}</code> (карта ***${escapeHtml(cardXabarInfo.cardLast4)})\n`
+      : '';
+
+    const groupMsg =
+      `${header}\n\n` +
+      cardLine +
+      `• <b>Покупатель:</b> ${escapeHtml(order.buyer_username)}\n` +
+      `• <b>Получатель:</b> ${escapeHtml(order.recipient_username)}\n` +
+      `• <b>Товар:</b> ${escapeHtml(itemDesc)}\n` +
+      `• <b>Сумма:</b> <code>${formatUzs(order.price_uzs)}</code>\n\n` +
+      fragmentNote;
+
+    await sendToAdminAndGroup(groupMsg);
+  }
+
+  return { ok: true, order, fragment: fragmentRes };
+}
+
+async function handleCardXabarPayment({ amount, cardLast4, msgId, msgDateMs }) {
+  const order = dao.findOrderForCardXabarPayment(amount, msgDateMs);
+  if (!order) {
+    console.log(`ℹ️ [CardXabar] Пополнение +${amount} UZS (***${cardLast4}) — подходящих активных заказов нет.`);
+    return { matched: false };
+  }
+
+  console.log(`🎯 [CardXabar] Совпадение! +${amount} UZS -> Заказ #${order.id} (${order.recipient_username})`);
+  const res = await fulfillOrder(order.id, {
+    confirmedBy: 'CardXabar Auto',
+    source: 'cardxabar',
+    cardXabarInfo: { amount, cardLast4, msgId }
+  });
+  return { matched: true, orderId: order.id, res };
+}
+
+async function notifyAdminSessionBackup(sessionString, apiId, apiHash) {
+  if (!sessionString) return;
+  const admins = getAdminIds();
+  const msg =
+    `🔐 <b>CardXabar подключён к Nate Stars!</b>\n\n` +
+    `Автоподтверждение платежей по карте запущено и уже работает.\n\n` +
+    `<b>Важно для Render:</b> Чтобы сессия не сбрасывалась при обновлениях сервера, сохраните эти 3 переменные в <i>Render → Environment</i>:\n` +
+    `• <code>TG_API_ID</code> = <code>${escapeHtml(apiId)}</code>\n` +
+    `• <code>TG_API_HASH</code> = <code>${escapeHtml(apiHash)}</code>\n` +
+    `• <code>TG_SESSION</code> = <code>${escapeHtml(sessionString)}</code>`;
+  for (const adminId of admins) {
+    try {
+      await bot.telegram.sendMessage(adminId, msg, { parse_mode: 'HTML' });
+    } catch (e) {}
+  }
+}
+
 // ===== API Маршруты =====
 
 // Каталог и текущие настройки цен
@@ -82,7 +268,8 @@ app.get('/api/catalog', (req, res) => {
     cardHolder: settings.card_holder || 'Uzcard / Humo',
     premium3Uzs: Number(settings.premium_3_uzs || 175000),
     premium6Uzs: Number(settings.premium_6_uzs || 245000),
-    premium12Uzs: Number(settings.premium_12_uzs || 395000)
+    premium12Uzs: Number(settings.premium_12_uzs || 395000),
+    autoConfirmEnabled: settings.auto_confirm_enabled === 'true'
   });
 });
 
@@ -108,29 +295,32 @@ app.get('/api/admin/info', auth, requireAdmin, (req, res) => {
   const stats = dao.getStats();
   const pendingOrders = dao.getPendingOrders();
   const fragmentConfig = FragmentService.getConfig();
+  const cardXabarStatus = CardXabarService.getStatus();
   res.json({
     settings,
     stats,
     pendingOrders,
-    fragmentConfig
+    fragmentConfig,
+    cardXabarStatus
   });
 });
 
-// Админ-панель: сохранение настроек из Mini App (включая Fragment)
+// Админ-панель: сохранение настроек из Mini App (включая Fragment и автоподтверждение)
 app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
-  const { 
-    starPriceUzs, 
-    minStars, 
-    cardNumber, 
-    cardHolder, 
-    premium3Uzs, 
-    premium6Uzs, 
-    premium12Uzs, 
+  const {
+    starPriceUzs,
+    minStars,
+    cardNumber,
+    cardHolder,
+    premium3Uzs,
+    premium6Uzs,
+    premium12Uzs,
     ordersChatId,
     fragmentEnabled,
     fragmentPhone,
     fragmentMnemonics,
-    fragmentApiKey
+    fragmentApiKey,
+    autoConfirmEnabled
   } = req.body;
 
   if (starPriceUzs) dao.setSetting('star_price_uzs', String(starPriceUzs));
@@ -141,6 +331,7 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
   if (premium6Uzs) dao.setSetting('premium_6_uzs', String(premium6Uzs));
   if (premium12Uzs) dao.setSetting('premium_12_uzs', String(premium12Uzs));
   if (ordersChatId !== undefined) dao.setSetting('orders_chat_id', String(ordersChatId));
+  if (autoConfirmEnabled !== undefined) dao.setSetting('auto_confirm_enabled', String(autoConfirmEnabled));
 
   // Настройки Fragment
   if (fragmentEnabled !== undefined) dao.setSetting('fragment_enabled', String(fragmentEnabled));
@@ -157,11 +348,80 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
     }
   }
 
-  res.json({ 
-    success: true, 
+  res.json({
+    success: true,
     settings: dao.getAllSettings(),
-    fragmentConfig: FragmentService.getConfig()
+    fragmentConfig: FragmentService.getConfig(),
+    cardXabarStatus: CardXabarService.getStatus()
   });
+});
+
+// ===== API авторизации слушателя CardXabar (Admin) =====
+app.get('/api/admin/cardxabar/status', auth, requireAdmin, (req, res) => {
+  res.json(CardXabarService.getStatus());
+});
+
+app.get('/api/admin/cardxabar/export', auth, requireAdmin, (req, res) => {
+  const settings = dao.getAllSettings();
+  const apiId = process.env.TG_API_ID || settings.tg_api_id || '';
+  const apiHash = process.env.TG_API_HASH || settings.tg_api_hash || '';
+  const sessionString = process.env.TG_SESSION || settings.tg_session_string || '';
+  res.json({ apiId, apiHash, sessionString });
+});
+
+app.post('/api/admin/cardxabar/auth-phone', auth, requireAdmin, async (req, res) => {
+  try {
+    const { apiId, apiHash, phone } = req.body;
+    const result = await CardXabarService.startPhoneAuth(apiId, apiHash, phone);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/cardxabar/auth-code', auth, requireAdmin, async (req, res) => {
+  try {
+    const { code } = req.body;
+    const result = await CardXabarService.submitPhoneCode(code);
+    if (result.sessionString) {
+      notifyAdminSessionBackup(result.sessionString, dao.getSetting('tg_api_id'), dao.getSetting('tg_api_hash'));
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/cardxabar/auth-qr', auth, requireAdmin, async (req, res) => {
+  try {
+    const { apiId, apiHash } = req.body;
+    const result = await CardXabarService.startQrAuth(apiId, apiHash);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/cardxabar/auth-password', auth, requireAdmin, async (req, res) => {
+  try {
+    const { password } = req.body;
+    const result = await CardXabarService.submitPassword(password);
+    if (result.sessionString) {
+      notifyAdminSessionBackup(result.sessionString, dao.getSetting('tg_api_id'), dao.getSetting('tg_api_hash'));
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/cardxabar/disconnect', auth, requireAdmin, async (req, res) => {
+  try {
+    await CardXabarService.disconnect();
+    res.json({ success: true, status: CardXabarService.getStatus() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Админ-панель: генерация нового чистого TON-кошелька (24 слова)
@@ -174,7 +434,7 @@ app.post('/api/admin/generate-wallet', auth, requireAdmin, async (req, res) => {
   }
 });
 
-// Админ-панель: запуск авторизации Fragment (через номер телефона и 24 слова)
+// Админ-панель: запуск авторизации Fragment
 app.post('/api/admin/fragment-auth', auth, requireAdmin, async (req, res) => {
   try {
     const { phone, mnemonics, apiKey } = req.body;
@@ -199,35 +459,23 @@ app.post('/api/admin/order-action', auth, requireAdmin, async (req, res) => {
   }
 
   if (action === 'confirm') {
-    dao.updateOrderStatus(orderId, 'confirmed');
-
-    // Автоматическая выдача через Fragment
-    const fragmentResult = await FragmentService.dispatchOrder(order);
-    console.log(`⚡ [Fragment Action] Заказ #${orderId}:`, fragmentResult);
-
-    const itemDesc = order.type === 'stars' ? `${order.amount} Telegram Stars` : `Telegram Premium на ${order.amount} мес.`;
-    const clientMsg = 
-      `<b>Заказ #${escapeHtml(order.id)} выполнен</b>\n\n` +
-      `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
-      `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
-      `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
-      `Товар успешно доставлен на указанный аккаунт. Спасибо за покупку в Nate Stars.`;
-
-    try {
-      await bot.telegram.sendMessage(order.telegram_id, clientMsg, { parse_mode: 'HTML' });
-    } catch (e) {
-      console.warn('Не удалось уведомить клиента:', e.message);
+    const fulfilled = await fulfillOrder(orderId, {
+      confirmedBy: req.telegramUser?.username ? '@' + req.telegramUser.username : 'Admin',
+      source: 'manual',
+      skipGroupNotice: false
+    });
+    if (!fulfilled.ok && fulfilled.reason === 'already_confirmed') {
+      return res.json({ success: true, status: 'confirmed', alreadyConfirmed: true });
     }
-
-    return res.json({ 
-      success: true, 
+    return res.json({
+      success: true,
       status: 'confirmed',
-      fragment: fragmentResult
+      fragment: fulfilled.fragment
     });
   } else if (action === 'reject') {
     dao.updateOrderStatus(orderId, 'rejected');
 
-    const clientMsg = 
+    const clientMsg =
       `<b>Заказ #${escapeHtml(order.id)} отклонён</b>\n\n` +
       `Оплата не была обнаружена или произошла ошибка.\n` +
       `Если вы совершили перевод, свяжитесь с поддержкой.`;
@@ -244,10 +492,10 @@ app.post('/api/admin/order-action', auth, requireAdmin, async (req, res) => {
   res.status(400).json({ error: 'Неизвестное действие' });
 });
 
-// Оформить заказ с оплатой на карту
-app.post('/api/create-order', auth, async (req, res) => {
+// Шаг 1 оформления заказа: резервирование точной суммы («копеек») до перевода
+app.post('/api/orders/prepare', auth, (req, res) => {
   try {
-    const { recipientUsername, type, amount, senderComment } = req.body;
+    const { recipientUsername, type, amount } = req.body;
     const tgUser = req.telegramUser;
 
     if (!recipientUsername) {
@@ -260,29 +508,183 @@ app.post('/api/create-order', auth, async (req, res) => {
     }
 
     const settings = dao.getAllSettings();
-    let priceUzs = 0;
-    let itemDescription = '';
-
-    if (type === 'stars') {
-      const starsCount = Number(amount);
-      const minStars = Number(settings.min_stars || 50);
-      if (isNaN(starsCount) || starsCount < minStars) {
-        return res.status(400).json({ error: `Минимум ${minStars} звёзд` });
-      }
-      const starPrice = Number(settings.star_price_uzs || 220);
-      priceUzs = starsCount * starPrice;
-      itemDescription = `${starsCount} Telegram Stars`;
-    } else if (type === 'premium') {
-      const months = Number(amount);
-      if (months === 3) priceUzs = Number(settings.premium_3_uzs || 175000);
-      else if (months === 6) priceUzs = Number(settings.premium_6_uzs || 245000);
-      else if (months === 12) priceUzs = Number(settings.premium_12_uzs || 395000);
-      else return res.status(400).json({ error: 'Некорректный срок Premium' });
-      itemDescription = `Telegram Premium на ${months} мес.`;
-    } else {
-      return res.status(400).json({ error: 'Неизвестный тип товара' });
+    let calc;
+    try {
+      calc = calculateBasePrice(type, amount, settings);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
     }
 
+    const { basePriceUzs, itemDescription } = calc;
+    const autoConfirm = settings.auto_confirm_enabled === 'true';
+    const cardNumber = settings.card_number || '5614681816265841';
+    const fullRecipient = '@' + cleanUsername;
+
+    const existing = dao.findReusableAwaitingOrder({
+      telegramId: tgUser.id,
+      type,
+      amount: Number(amount),
+      recipientUsername: fullRecipient,
+      basePriceUzs
+    });
+
+    if (existing) {
+      return res.json({
+        success: true,
+        autoConfirm,
+        order: {
+          id: existing.id,
+          priceUzs: existing.price_uzs,
+          basePriceUzs: existing.base_price_uzs || existing.price_uzs,
+          deltaUzs: existing.price_uzs - (existing.base_price_uzs || existing.price_uzs),
+          itemDescription,
+          cardNumber: existing.card_number,
+          recipientUsername: existing.recipient_username,
+          status: existing.status
+        }
+      });
+    }
+
+    const finalPriceUzs = autoConfirm ? dao.allocateUniquePrice(basePriceUzs) : basePriceUzs;
+    const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
+
+    dao.createOrder({
+      id: orderId,
+      telegramId: tgUser.id,
+      buyerUsername: tgUser.username ? '@' + tgUser.username : tgUser.first_name,
+      recipientUsername: fullRecipient,
+      type,
+      amount: Number(amount),
+      priceUzs: finalPriceUzs,
+      basePriceUzs,
+      cardNumber,
+      status: 'awaiting_payment',
+      senderComment: ''
+    });
+
+    res.json({
+      success: true,
+      autoConfirm,
+      order: {
+        id: orderId,
+        priceUzs: finalPriceUzs,
+        basePriceUzs,
+        deltaUzs: finalPriceUzs - basePriceUzs,
+        itemDescription,
+        cardNumber,
+        recipientUsername: fullRecipient,
+        status: 'awaiting_payment'
+      }
+    });
+  } catch (err) {
+    console.error('Ошибка подготовки заказа:', err);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// Шаг 2: клиент нажал «Я оплатил» — перевод в pending и уведомление админа (если ещё не автоподтверждён)
+app.post('/api/orders/:id/paid', auth, async (req, res) => {
+  try {
+    const orderId = req.params.id;
+    const { senderComment } = req.body || {};
+    const order = dao.getOrder(orderId);
+
+    if (!order) {
+      return res.status(404).json({ error: 'Заказ не найден' });
+    }
+    if (Number(order.telegram_id) !== Number(req.telegramUser.id) && !isAdmin(req.telegramUser.id)) {
+      return res.status(403).json({ error: 'Доступ запрещён' });
+    }
+
+    if (order.status === 'confirmed') {
+      return res.json({ success: true, alreadyConfirmed: true, order });
+    }
+
+    const wasAwaiting = order.status === 'awaiting_payment';
+    dao.markOrderPaidByUser(orderId, String(senderComment || '').trim());
+    const updatedOrder = dao.getOrder(orderId);
+
+    if (wasAwaiting) {
+      await notifyAdminsOfPendingOrder(updatedOrder);
+    }
+
+    res.json({ success: true, order: updatedOrder });
+  } catch (err) {
+    console.error('Ошибка отметки оплаты:', err);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// Проверка статуса заказа в реальном времени (для модалки автооплаты)
+app.get('/api/orders/:id/status', auth, (req, res) => {
+  const order = dao.getOrder(req.params.id);
+  if (!order) {
+    return res.status(404).json({ error: 'Заказ не найден' });
+  }
+  if (Number(order.telegram_id) !== Number(req.telegramUser.id) && !isAdmin(req.telegramUser.id)) {
+    return res.status(403).json({ error: 'Доступ запрещён' });
+  }
+  res.json({
+    id: order.id,
+    status: order.status,
+    priceUzs: order.price_uzs,
+    paymentSource: order.payment_source || 'manual'
+  });
+});
+
+// Совместимый эндпоинт прямого создания заказа (если вызван без prepare)
+app.post('/api/create-order', auth, async (req, res) => {
+  try {
+    const { recipientUsername, type, amount, senderComment, orderId: preparedId } = req.body;
+    const tgUser = req.telegramUser;
+
+    if (preparedId) {
+      const existing = dao.getOrder(preparedId);
+      if (existing && Number(existing.telegram_id) === Number(tgUser.id)) {
+        if (existing.status === 'confirmed') {
+          return res.json({ success: true, alreadyConfirmed: true, order: existing });
+        }
+        const wasAwaiting = existing.status === 'awaiting_payment';
+        dao.markOrderPaidByUser(preparedId, String(senderComment || '').trim());
+        const updated = dao.getOrder(preparedId);
+        if (wasAwaiting) await notifyAdminsOfPendingOrder(updated);
+        const itemDescription = existing.type === 'stars'
+          ? `${existing.amount} Telegram Stars`
+          : `Telegram Premium на ${existing.amount} мес.`;
+        return res.json({
+          success: true,
+          order: {
+            id: updated.id,
+            priceUzs: updated.price_uzs,
+            itemDescription,
+            cardNumber: updated.card_number,
+            recipientUsername: updated.recipient_username,
+            status: updated.status
+          }
+        });
+      }
+    }
+
+    if (!recipientUsername) {
+      return res.status(400).json({ error: 'Укажите @username получателя' });
+    }
+
+    const cleanUsername = recipientUsername.replace(/^@/, '').trim();
+    if (!cleanUsername) {
+      return res.status(400).json({ error: 'Некорректный username' });
+    }
+
+    const settings = dao.getAllSettings();
+    let calc;
+    try {
+      calc = calculateBasePrice(type, amount, settings);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    const { basePriceUzs, itemDescription } = calc;
+    const autoConfirm = settings.auto_confirm_enabled === 'true';
+    const priceUzs = autoConfirm ? dao.allocateUniquePrice(basePriceUzs) : basePriceUzs;
     const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
     const cardNumber = settings.card_number || '5614681816265841';
 
@@ -294,57 +696,13 @@ app.post('/api/create-order', auth, async (req, res) => {
       type,
       amount: Number(amount),
       priceUzs,
+      basePriceUzs,
       cardNumber,
+      status: 'pending',
       senderComment
     });
 
-    // Сообщение для администратора / группы (безопасный HTML)
-    const adminMessage = 
-      `<b>НОВЫЙ ЗАКАЗ #${escapeHtml(orderId)}</b>\n\n` +
-      `• <b>Покупатель:</b> ${escapeHtml(tgUser.username ? '@' + tgUser.username : tgUser.first_name)} (ID: <code>${tgUser.id}</code>)\n` +
-      `• <b>Получатель:</b> @${escapeHtml(cleanUsername)}\n` +
-      `• <b>Товар:</b> ${escapeHtml(itemDescription)}\n` +
-      `• <b>Сумма:</b> <code>${formatUzs(priceUzs)}</code>\n` +
-      `• <b>Карта оплаты:</b> <code>${cardNumber}</code>\n` +
-      (senderComment ? `• <b>Чек / отправитель:</b> ${escapeHtml(senderComment)}\n` : '') +
-      `\n<i>Статус: ожидает проверки платежа</i>`;
-
-    const orderButtons = {
-      inline_keyboard: [
-        [
-          { text: '✅ Подтвердить', callback_data: `pre_confirm_${orderId}` },
-          { text: '❌ Отклонить', callback_data: `pre_reject_${orderId}` }
-        ]
-      ]
-    };
-
-    // 1. Отправляем в группу заказов (если подключена через /setgroup)
-    const ordersChatId = dao.getSetting('orders_chat_id');
-    if (ordersChatId) {
-      try {
-        await bot.telegram.sendMessage(ordersChatId, adminMessage, {
-          parse_mode: 'HTML',
-          reply_markup: orderButtons
-        });
-      } catch (err) {
-        console.warn('Ошибка отправки в группу заказов:', err.message);
-      }
-    }
-
-    // 2. Отправляем лично владельцу (5379376281) и другим админам
-    const admins = getAdminIds();
-    for (const adminId of admins) {
-      // Не дублируем, если adminId совпадает с чатом группы
-      if (String(adminId) === String(ordersChatId)) continue;
-      try {
-        await bot.telegram.sendMessage(adminId, adminMessage, {
-          parse_mode: 'HTML',
-          reply_markup: orderButtons
-        });
-      } catch (err) {
-        console.warn(`Не удалось отправить админу ${adminId}:`, err.message);
-      }
-    }
+    await notifyAdminsOfPendingOrder(dao.getOrder(orderId));
 
     res.json({
       success: true,
@@ -353,7 +711,8 @@ app.post('/api/create-order', auth, async (req, res) => {
         priceUzs,
         itemDescription,
         cardNumber,
-        recipientUsername: '@' + cleanUsername
+        recipientUsername: '@' + cleanUsername,
+        status: 'pending'
       }
     });
 
@@ -621,15 +980,26 @@ bot.action(/real_confirm_(.+)/, async (ctx) => {
   const orderId = ctx.match[1];
   const order = dao.getOrder(orderId);
   if (!order) return ctx.answerCbQuery('Заказ не найден');
-  if (order.status === 'confirmed') return ctx.answerCbQuery('Заказ уже подтверждён');
+  if (order.status === 'confirmed') {
+    await ctx.answerCbQuery('Заказ уже подтверждён');
+    try {
+      await ctx.editMessageReplyMarkup({
+        inline_keyboard: [[{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]]
+      });
+    } catch (e) {}
+    return;
+  }
 
-  dao.updateOrderStatus(orderId, 'confirmed');
   await ctx.answerCbQuery('Заказ подтверждён! Отправка...');
-
-  // Автоматическая выдача через Fragment
-  const fragmentRes = await FragmentService.dispatchOrder(order);
   const adminName = ctx.from.username ? '@' + ctx.from.username : ctx.from.first_name;
 
+  const fulfilled = await fulfillOrder(orderId, {
+    confirmedBy: adminName,
+    source: 'manual',
+    skipGroupNotice: true
+  });
+
+  const fragmentRes = fulfilled.fragment || { success: false, error: 'Не выполнен' };
   let fragmentNote = '';
   if (fragmentRes.success) {
     fragmentNote = `\n⚡ <b>Fragment:</b> ${escapeHtml(fragmentRes.message)}`;
@@ -653,20 +1023,6 @@ bot.action(/real_confirm_(.+)/, async (ctx) => {
     );
   } catch (e) {
     console.warn('Ошибка обновления сообщения заказа:', e.message);
-  }
-
-  const itemDesc = order.type === 'stars' ? `${order.amount} Telegram Stars` : `Telegram Premium на ${order.amount} мес.`;
-  const clientMsg = 
-    `<b>Заказ #${escapeHtml(order.id)} выполнен</b>\n\n` +
-    `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
-    `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
-    `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
-    `Товар успешно доставлен на указанный аккаунт. Спасибо за покупку в Nate Stars.`;
-
-  try {
-    await bot.telegram.sendMessage(order.telegram_id, clientMsg, { parse_mode: 'HTML' });
-  } catch (e) {
-    console.warn('Не удалось уведомить клиента:', e.message);
   }
 });
 
@@ -918,6 +1274,12 @@ async function start() {
 
     bot.launch();
     console.log('✅ Бот слушает сообщения!');
+
+    // Запускаем облачный слушатель @CardXabarBot (если авторизован)
+    CardXabarService.init(handleCardXabarPayment).catch(err => {
+      console.warn('⚠️ Ошибка запуска CardXabar:', err.message);
+    });
+
     console.log(`\n🎉 Всё готово! Бот: https://t.me/${botInfo.username}\n`);
 
   } catch (err) {
@@ -926,8 +1288,9 @@ async function start() {
   }
 }
 
-function shutdown() {
+async function shutdown() {
   console.log('\nОстановка сервисов...');
+  await CardXabarService.stopListenerOnly();
   if (tunnelProc) tunnelProc.kill();
   bot.stop();
   process.exit(0);

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="src/styles/main.css?v=12">
+  <link rel="stylesheet" href="src/styles/main.css?v=13">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     if (window.Telegram && window.Telegram.WebApp) {
@@ -395,6 +395,100 @@
           </button>
         </div>
 
+        <!-- CardXabar Auto-Confirm Card -->
+        <div class="glass-card admin-settings-card" style="margin-top: 14px;" id="cardXabarAdminCard">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <h3 class="card-title" style="margin:0;">Автооплата @CardXabarBot</h3>
+            <span id="cxStatusBadge" class="status-badge-clean pending">Не подключён</span>
+          </div>
+          <p class="field-help" style="margin-bottom: 12px;">Автоматическая проверка переводов по карте через @CardXabarBot с точностью до 1 сума («копейки»)</p>
+
+          <div class="form-group">
+            <label class="form-label" for="settingAutoConfirmEnabled">Режим подтверждения</label>
+            <select id="settingAutoConfirmEnabled" class="form-control">
+              <option value="true">Автомат (уникальная сумма + @CardXabarBot)</option>
+              <option value="false">Вручную (подтверждает администратор)</option>
+            </select>
+          </div>
+
+          <!-- Connected State Box -->
+          <div id="cxConnectedBox" style="display:none; margin-bottom:12px;">
+            <div class="cx-connected-banner">
+              <div>
+                <div style="font-size:0.78rem; font-weight:700; color:#fff;">Слушатель работает 24/7</div>
+                <div style="font-size:0.72rem; color:var(--blue-bright);" id="cxAccountLabel">@account</div>
+              </div>
+              <span class="status-badge-clean confirmed" id="cxBotResolvedBadge">CardXabar OK</span>
+            </div>
+            <div style="display:flex; gap:8px; margin-top:8px;">
+              <button type="button" class="cta-secondary-btn" style="flex:1; padding:10px; font-size:0.74rem;" onclick="copyCardXabarSession()">
+                <span>📋 Скопировать данные для Render</span>
+              </button>
+              <button type="button" class="action-btn-reject" style="flex:0 0 auto; padding:10px 12px;" onclick="disconnectCardXabar()">
+                Отключить
+              </button>
+            </div>
+          </div>
+
+          <!-- Auth Setup Box -->
+          <div id="cxSetupBox">
+            <div class="admin-fields-row">
+              <div class="form-group">
+                <label class="form-label" for="cxApiId">API ID (my.telegram.org)</label>
+                <input type="text" id="cxApiId" class="form-control" placeholder="Например: 28194021">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="cxApiHash">API Hash</label>
+                <input type="text" id="cxApiHash" class="form-control" placeholder="32 символа...">
+              </div>
+            </div>
+            <span class="field-help" style="margin-top:-6px; margin-bottom:10px;">
+              Получить за 1 минуту на <a href="https://my.telegram.org/apps" target="_blank" class="text-link">my.telegram.org/apps</a> → API development tools
+            </span>
+
+            <div class="form-group">
+              <label class="form-label" for="cxPhone">Телефон аккаунта с @CardXabarBot</label>
+              <input type="text" id="cxPhone" class="form-control" placeholder="+998930690203">
+            </div>
+
+            <div style="display:flex; gap:8px; margin-bottom:10px;">
+              <button type="button" class="cta-primary-btn cta-btn-blue" style="flex:1; padding:11px; font-size:0.76rem;" id="cxSendCodeBtn" onclick="startCardXabarPhoneAuth()">
+                <span>📱 Войти по коду</span>
+              </button>
+              <button type="button" class="cta-secondary-btn" style="flex:1; padding:11px; font-size:0.76rem;" id="cxQrBtn" onclick="startCardXabarQrAuth()">
+                <span>📷 По QR-коду</span>
+              </button>
+            </div>
+
+            <!-- Phone Code Input Step -->
+            <div id="cxCodeBox" style="display:none; padding:12px; background:var(--bg-sunken); border-radius:var(--r-md); border:var(--hairline-strong); margin-bottom:10px;">
+              <label class="form-label" for="cxCodeInput">Введите код из Telegram / SMS</label>
+              <div style="display:flex; gap:8px;">
+                <input type="text" id="cxCodeInput" class="form-control" placeholder="12345" autocomplete="off">
+                <button type="button" class="cta-primary-btn" style="width:auto; padding:0 16px;" onclick="submitCardXabarCode()">ОК</button>
+              </div>
+            </div>
+
+            <!-- QR Display Step -->
+            <div id="cxQrBox" style="display:none; text-align:center; padding:14px; background:var(--bg-sunken); border-radius:var(--r-md); border:var(--hairline-strong); margin-bottom:10px;">
+              <img id="cxQrImg" src="" alt="Telegram QR" style="width:180px; height:180px; border-radius:10px; background:#fff; padding:6px;">
+              <div class="field-help" style="margin-top:8px;">Откройте Telegram на телефоне → Настройки → Устройства → Подключить устройство</div>
+            </div>
+
+            <!-- 2FA Password Step -->
+            <div id="cxPasswordBox" style="display:none; padding:12px; background:var(--bg-sunken); border-radius:var(--r-md); border:var(--hairline-strong); margin-bottom:10px;">
+              <label class="form-label" for="cxPasswordInput">Облачный пароль Telegram (2FA) <span id="cxPasswordHint" style="color:var(--text-soft);"></span></label>
+              <div style="display:flex; gap:8px;">
+                <input type="password" id="cxPasswordInput" class="form-control" placeholder="Ваш пароль 2FA">
+                <button type="button" class="cta-primary-btn" style="width:auto; padding:0 16px;" onclick="submitCardXabarPassword()">Войти</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="cxErrorBox" style="display:none; color:var(--error); font-size:0.75rem; margin-top:6px;"></div>
+          <div id="cxRecentLogs" class="cx-logs-box" style="margin-top:10px;"></div>
+        </div>
+
         <!-- Fragment Integration Form -->
         <div class="glass-card admin-settings-card" style="margin-top: 14px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -425,37 +519,18 @@
               </button>
             </div>
             <textarea id="settingFragmentMnemonics" class="form-control" rows="3" style="font-family: monospace; font-size: 13px;" placeholder="24 слова через пробел"></textarea>
-            <span class="field-help">Стандарт V4R2. Если кошелька на 24 слова нет — нажмите кнопку «Сгенерировать 24 слова» выше, скопируйте фразу и импортируйте её в Tonkeeper.</span>
+            <span class="field-help">Стандарт V5R1 (W5). Кошелёк: UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5LCk</span>
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="settingFragmentApiKey">API Ключ Fragment (с дашборда fragment-api.com)</label>
+            <label class="form-label" for="settingFragmentApiKey">API Ключ Fragment (необязательно)</label>
             <input type="text" id="settingFragmentApiKey" class="form-control" placeholder="Например: 6c3a1b4e-...">
-            <span class="field-help">Скопируйте в профиле на <a href="https://fragment-api.com/dashboard" target="_blank" class="text-link">fragment-api.com/dashboard</a></span>
           </div>
 
           <div style="display:flex; flex-direction:column; gap:8px; margin-top:14px;">
-            <button class="cta-primary-btn cta-btn-blue" id="startAuthFragmentBtn" onclick="startFragmentAuth()">
-              <span>🔑 Авторизовать Fragment</span>
-            </button>
             <button class="cta-secondary-btn" id="saveFragmentBtn" onclick="saveAdminSettings()">
               <span>Сохранить настройки</span>
             </button>
-          </div>
-
-          <div class="instruction-list" style="margin-top: 14px;">
-            <div class="inst-step">
-              <span class="step-num">1</span>
-              <span>Нажмите «Авторизовать Fragment»</span>
-            </div>
-            <div class="inst-step">
-              <span class="step-num">2</span>
-              <span>В Telegram придёт запрос «Авторизация: fragment.com». Нажмите «Авторизоваться»</span>
-            </div>
-            <div class="inst-step">
-              <span class="step-num">3</span>
-              <span>Бот сохранит токен, и при клике «ТОЧНО ВЫДАТЬ» звёзды будут улетать автоматически</span>
-            </div>
           </div>
         </div>
       </section>
@@ -488,8 +563,19 @@
               <span class="spec-val text-accent" id="modalRecipient">@username</span>
             </div>
             <div class="spec-row divider">
-              <span class="spec-label">Сумма к оплате</span>
-              <span class="spec-total" id="modalPrice">110 000 сум</span>
+              <span class="spec-label">Точная сумма к оплате</span>
+              <div style="display:flex; align-items:center; gap:8px; cursor:pointer;" onclick="copyOrderPrice()">
+                <span class="spec-total" id="modalPrice">110 000 сум</span>
+                <button type="button" class="copy-action-btn" style="padding:4px 8px; font-size:0.7rem;">Копировать</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Exact Amount Auto-Confirm Alert -->
+          <div id="autoPayNotice" class="auto-pay-banner" style="display:none;">
+            <div class="auto-pay-title">⚡ Мгновенное автоподтверждение</div>
+            <div class="auto-pay-text">
+              Переведите <b>РОВНО <span id="autoPayExactSum">0 сум</span></b> (до 1 сума). Система увидит зачисление и автоматически отправит заказ за 5–10 секунд!
             </div>
           </div>
 
@@ -537,11 +623,11 @@
           <div class="instruction-list">
             <div class="inst-step">
               <span class="step-num">1</span>
-              <span>Скопируйте карту и переведите сумму в Click, Payme или Uzum</span>
+              <span>Скопируйте карту и точную сумму, переведите в Click, Payme или Uzum</span>
             </div>
             <div class="inst-step">
               <span class="step-num">2</span>
-              <span>Нажмите кнопку «Я оплатил» для отправки на проверку</span>
+              <span>Нажмите «Я оплатил» или просто подождите пару секунд в этом окне</span>
             </div>
           </div>
 
@@ -564,8 +650,8 @@
           </svg>
         </div>
 
-        <h3 class="success-title">Заказ передан на проверку</h3>
-        <p class="success-description">Номер заказа <span class="order-mono-id" id="successOrderId">#NS-123456</span>. Администратор проверит поступление платежа и доставит товар.</p>
+        <h3 class="success-title" id="successTitle">Заказ передан на проверку</h3>
+        <p class="success-description" id="successDescription">Номер заказа <span class="order-mono-id" id="successOrderId">#NS-123456</span>. Оплата проверяется автоматически.</p>
 
         <div class="success-spec-table">
           <div class="s-row">
@@ -582,7 +668,7 @@
           </div>
         </div>
 
-        <p class="notification-notice">Уведомление о зачислении придёт в чат Telegram-бота.</p>
+        <p class="notification-notice" id="successNotice">Уведомление о зачислении придёт в чат Telegram-бота.</p>
 
         <button class="cta-primary-btn" onclick="closeSuccessModal()">
           <span>Перейти к заказам</span>
@@ -595,8 +681,8 @@
 
   <div class="toast-notification" id="toast"></div>
 
-  <script src="src/utils/api.js?v=11"></script>
-  <script src="src/utils/helpers.js?v=11"></script>
-  <script src="src/app.js?v=11"></script>
+  <script src="src/utils/api.js?v=13"></script>
+  <script src="src/utils/helpers.js?v=13"></script>
+  <script src="src/app.js?v=13"></script>
 </body>
 </html>
