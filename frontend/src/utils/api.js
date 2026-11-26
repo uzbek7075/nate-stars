@@ -176,6 +176,12 @@ const API = (() => {
       return request('/api/admin/ton-balance');
     },
 
+    refreshAdminTonRate() {
+      return request('/api/admin/ton-rate/refresh', {
+        method: 'POST'
+      });
+    },
+
     sendBroadcastTest(text, includeOpenButton = true) {
       return request('/api/admin/broadcast/test', {
         method: 'POST',

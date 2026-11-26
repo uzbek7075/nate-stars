@@ -10,6 +10,7 @@ const { initDatabase, dao, calculateCostUzs } = require('./database');
 const { authMiddleware } = require('./auth');
 const { FragmentService } = require('./fragment');
 const { TonTransferService, parseAndValidateAddress, formatTonAmount } = require('./ton');
+const { refreshTonRate, getSavedTonRateSnapshot } = require('./tonRate');
 const { CardXabarService } = require('./cardxabar');
 
 // ===== Конфигурация =====
@@ -729,6 +730,7 @@ app.get('/api/admin/info', auth, requireAdmin, async (req, res) => {
   const pendingOrders = dao.getPendingOrders();
   const fragmentConfig = FragmentService.getConfig();
   const cardXabarStatus = CardXabarService.getStatus();
+  const tonRateInfo = getSavedTonRateSnapshot();
   const walletBalance = await Promise.race([
     FragmentService.getWalletBalance(),
     new Promise(resolve => setTimeout(() => resolve({ success: false, balance: 0, error: 'Таймаут' }), 4000))
@@ -739,10 +741,25 @@ app.get('/api/admin/info', auth, requireAdmin, async (req, res) => {
     profitStats,
     broadcastStats,
     walletBalance,
+    tonRateInfo,
     pendingOrders,
     fragmentConfig,
     cardXabarStatus
   });
+});
+
+// Админ-панель: принудительное обновление автокурса TON по бирже и ЦБ
+app.post('/api/admin/ton-rate/refresh', auth, requireAdmin, async (req, res) => {
+  try {
+    const tonRateInfo = await refreshTonRate({ force: true });
+    res.json({
+      success: true,
+      tonRateInfo,
+      settings: dao.getAllSettings()
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Не удалось обновить курс TON' });
+  }
 });
 
 // Админ-панель: проверка актуального баланса TON-кошелька
@@ -786,8 +803,8 @@ app.post('/api/admin/broadcast/send', auth, requireAdmin, async (req, res) => {
   }
 });
 
-// Админ-панель: сохранение настроек из Mini App (включая Fragment, себестоимость, порог TON и автоподтверждение)
-app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
+// Админ-панель: сохранение настроек из Mini App (включая Fragment, себестоимость, автокурс TON и автоподтверждение)
+app.post('/api/admin/update-settings', auth, requireAdmin, async (req, res) => {
   const {
     starPriceUzs,
     minStars,
@@ -809,7 +826,13 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
     costPrem12Uzs,
     tonPriceUzs,
     costTonUzs,
-    minTon
+    minTon,
+    tonAutoRateEnabled,
+    tonProviderSpreadPct,
+    tonMarkupMode,
+    tonMarkupUzs,
+    tonMarkupPct,
+    tonMinFloorUzs
   } = req.body;
 
   if (starPriceUzs) dao.setSetting('star_price_uzs', String(starPriceUzs));
@@ -830,6 +853,13 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
   if (costTonUzs !== undefined && costTonUzs !== '') dao.setSetting('cost_ton_uzs', String(costTonUzs));
   if (minTon !== undefined && minTon !== '') dao.setSetting('min_ton', String(minTon));
 
+  if (tonAutoRateEnabled !== undefined) dao.setSetting('ton_auto_rate_enabled', String(tonAutoRateEnabled));
+  if (tonProviderSpreadPct !== undefined && tonProviderSpreadPct !== '') dao.setSetting('ton_provider_spread_pct', String(tonProviderSpreadPct));
+  if (tonMarkupMode === 'fixed' || tonMarkupMode === 'percent') dao.setSetting('ton_markup_mode', tonMarkupMode);
+  if (tonMarkupUzs !== undefined && tonMarkupUzs !== '') dao.setSetting('ton_markup_uzs', String(tonMarkupUzs));
+  if (tonMarkupPct !== undefined && tonMarkupPct !== '') dao.setSetting('ton_markup_pct', String(tonMarkupPct));
+  if (tonMinFloorUzs !== undefined && tonMinFloorUzs !== '') dao.setSetting('ton_min_floor_uzs', String(tonMinFloorUzs));
+
   // Настройки Fragment
   if (fragmentEnabled !== undefined) dao.setSetting('fragment_enabled', String(fragmentEnabled));
   if (fragmentPhone !== undefined) dao.setSetting('fragment_phone', String(fragmentPhone));
@@ -845,9 +875,19 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
     }
   }
 
+  let tonRateInfo = getSavedTonRateSnapshot();
+  if (dao.getSetting('ton_auto_rate_enabled') !== 'false') {
+    try {
+      tonRateInfo = await refreshTonRate({ force: true });
+    } catch (e) {
+      console.warn('⚠️ Ошибка пересчёта автокурса TON:', e.message);
+    }
+  }
+
   res.json({
     success: true,
     settings: dao.getAllSettings(),
+    tonRateInfo,
     fragmentConfig: FragmentService.getConfig(),
     cardXabarStatus: CardXabarService.getStatus()
   });
@@ -1351,18 +1391,24 @@ bot.command('admin', async (ctx) => {
   const prem12 = settings.premium_12_uzs || '395000';
   const card = settings.card_number || '5614681816265841';
   const group = settings.orders_chat_id || 'Не привязана (напишите /setgroup в группе)';
+  const autoTonEnabled = settings.ton_auto_rate_enabled !== 'false';
+  const markupNote = !autoTonEnabled
+    ? 'ручной тариф'
+    : settings.ton_markup_mode === 'percent'
+      ? `авто +${settings.ton_markup_pct || 15}%`
+      : `авто +${formatUzs(settings.ton_markup_uzs || 2000)}`;
 
   const text = 
     `<b>Панель управления Nate Stars</b>\n\n` +
     `Текущие тарифы:\n` +
     `• 1 звезда: <b>${starPrice} сум</b>\n` +
-    `• 1 TON: <b>${formatUzs(tonPrice)}</b>\n` +
+    `• 1 TON: <b>${formatUzs(tonPrice)}</b> (${markupNote})\n` +
     `• Premium 3 мес: <b>${formatUzs(prem3)}</b>\n` +
     `• Premium 6 мес: <b>${formatUzs(prem6)}</b>\n` +
     `• Premium 12 мес: <b>${formatUzs(prem12)}</b>\n` +
     `• Карта для оплаты: <code>${card}</code>\n` +
     `• Группа заказов: <code>${group}</code>\n\n` +
-    `<i>Вы также можете менять цены прямо внутри Mini App во вкладке «Управление»!</i>`;
+    `<i>Вы также можете менять цены и наценку % прямо внутри Mini App во вкладке «Управление»!</i>`;
 
   ctx.reply(text, {
     parse_mode: 'HTML',
@@ -1377,8 +1423,12 @@ bot.command('admin', async (ctx) => {
           { text: '📋 Ожидающие заказы', callback_data: 'view_pending_orders' }
         ],
         [
+          { text: '🔄 Обновить курс TON', callback_data: 'refresh_ton_rate_bot' },
+          { text: '📈 Наценка TON %', callback_data: 'edit_ton_markup_pct' }
+        ],
+        [
           { text: 'Цена за 1 звезду', callback_data: 'edit_star_price' },
-          { text: 'Цена за 1 TON', callback_data: 'edit_ton_price' }
+          { text: 'Наценка фикс (сум)', callback_data: 'edit_ton_markup_uzs' }
         ],
         [
           { text: 'Premium 3м', callback_data: 'edit_prem_3' },
@@ -1487,6 +1537,25 @@ bot.action('cancel_broadcast_bot', async (ctx) => {
   await ctx.editMessageText('❌ Рассылка отменена.').catch(() => {});
 });
 
+bot.action('refresh_ton_rate_bot', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+  await ctx.answerCbQuery('Обновляем курс TON...');
+  try {
+    const snap = await refreshTonRate({ force: true });
+    await ctx.reply(
+      `🔄 <b>Курс TON обновлён</b>\n\n` +
+      `• Биржа TON/USD (${escapeHtml(snap.tonSource)}): <b>$${snap.tonUsd}</b>\n` +
+      `• Курс ЦБ (${escapeHtml(snap.usdSource)}): <b>${snap.usdUzs} сум</b>\n` +
+      `• Закуп (+${snap.providerSpreadPct}% Asterium): <b>${formatUzs(snap.purchaseCostUzs)}</b>\n` +
+      `• Цена на витрине: <b>${formatUzs(snap.effectivePriceUzs)}</b>`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Ошибка обновления курса: ${escapeHtml(err.message)}`, { parse_mode: 'HTML' });
+  }
+});
+
 // Обработка кнопок админки
 bot.action(/edit_(.+)/, async (ctx) => {
   const userId = ctx.from.id;
@@ -1502,7 +1571,15 @@ bot.action(/edit_(.+)/, async (ctx) => {
       break;
     case 'ton_price':
       adminStates.set(userId, 'set_ton_price');
-      promptText = 'Введите новую цену за 1 TON в сумах (например: <code>20000</code>):';
+      promptText = 'Введите новую цену за 1 TON в сумах (например: <code>14000</code>):';
+      break;
+    case 'ton_markup_pct':
+      adminStates.set(userId, 'set_ton_markup_pct');
+      promptText = 'Введите наценку на TON в <b>процентах %</b> поверх закупа (например: <code>15</code> или <code>18.5</code>):';
+      break;
+    case 'ton_markup_uzs':
+      adminStates.set(userId, 'set_ton_markup_uzs');
+      promptText = 'Введите фиксированную наценку на 1 TON в <b>сумах</b> (например: <code>2000</code>):';
       break;
     case 'prem_3':
       adminStates.set(userId, 'set_prem_3');
@@ -1925,8 +2002,29 @@ bot.on('text', async (ctx, next) => {
     case 'set_ton_price': {
       const num = parseInt(text.replace(/\s+/g, ''), 10);
       if (isNaN(num) || num <= 0) return ctx.reply('Введите положительное число.');
+      dao.setSetting('ton_auto_rate_enabled', 'false');
       dao.setSetting('ton_price_uzs', String(num));
-      return ctx.reply(`Цена за 1 TON сохранена: <b>${formatUzs(num)}</b>`, { parse_mode: 'HTML' });
+      return ctx.reply(`Цена за 1 TON (ручной режим): <b>${formatUzs(num)}</b>`, { parse_mode: 'HTML' });
+    }
+    case 'set_ton_markup_pct': {
+      const val = parseFloat(text.replace(',', '.'));
+      if (isNaN(val) || val < 0 || val > 500) return ctx.reply('Введите процент от 0 до 500 (например: 15).');
+      dao.setSetting('ton_auto_rate_enabled', 'true');
+      dao.setSetting('ton_markup_mode', 'percent');
+      dao.setSetting('ton_markup_pct', String(val));
+      const snap = await refreshTonRate({ force: true }).catch(() => null);
+      const priceNote = snap ? ` (новая цена: <b>${formatUzs(snap.effectivePriceUzs)}</b>)` : '';
+      return ctx.reply(`Включена авто-наценка <b>+${val}%</b> к закупу TON${priceNote}`, { parse_mode: 'HTML' });
+    }
+    case 'set_ton_markup_uzs': {
+      const num = parseInt(text.replace(/\s+/g, ''), 10);
+      if (isNaN(num) || num < 0) return ctx.reply('Введите число в сумах (например: 2000).');
+      dao.setSetting('ton_auto_rate_enabled', 'true');
+      dao.setSetting('ton_markup_mode', 'fixed');
+      dao.setSetting('ton_markup_uzs', String(num));
+      const snap = await refreshTonRate({ force: true }).catch(() => null);
+      const priceNote = snap ? ` (новая цена: <b>${formatUzs(snap.effectivePriceUzs)}</b>)` : '';
+      return ctx.reply(`Включена фикс. авто-наценка <b>+${formatUzs(num)}</b> на 1 TON${priceNote}`, { parse_mode: 'HTML' });
     }
     case 'set_prem_3': {
       const num = parseInt(text.replace(/\s+/g, ''), 10);
@@ -2063,11 +2161,20 @@ async function startTunnelProcess() {
 // ===== Запуск =====
 let tunnelProc = null;
 let tonMonitorTimer = null;
+let tonRateTimer = null;
 
 async function start() {
   try {
     await initDatabase();
     console.log('💾 База данных готова');
+
+    // Первичное обновление автокурса TON до открытия витрины (таймаут 4 сек)
+    await Promise.race([
+      refreshTonRate({ force: true }).then(s => {
+        console.log(`💱 Автокурс TON: $${s.tonUsd} × ${s.usdUzs} (+${s.providerSpreadPct}% = ${s.purchaseCostUzs}) -> ${s.effectivePriceUzs} сум`);
+      }),
+      new Promise(resolve => setTimeout(resolve, 4000))
+    ]).catch(err => console.warn('⚠️ Первичное обновление курса TON:', err.message));
 
     await new Promise((resolve) => app.listen(PORT, resolve));
     console.log(`🚀 Сервер запущен на порту ${PORT}`);
@@ -2120,6 +2227,11 @@ async function start() {
       checkLowTonBalanceAndNotify().catch(() => {});
     }, 10 * 60 * 1000);
 
+    // Автообновление рыночного курса TON каждые 5 минут
+    tonRateTimer = setInterval(() => {
+      refreshTonRate().catch(err => console.warn('⚠️ Автокурс TON:', err.message));
+    }, 5 * 60 * 1000);
+
     console.log(`\n🎉 Всё готово! Бот: https://t.me/${botInfo.username}\n`);
 
   } catch (err) {
@@ -2131,6 +2243,7 @@ async function start() {
 async function shutdown() {
   console.log('\nОстановка сервисов...');
   if (tonMonitorTimer) clearInterval(tonMonitorTimer);
+  if (tonRateTimer) clearInterval(tonRateTimer);
   await CardXabarService.stopListenerOnly();
   if (tunnelProc) tunnelProc.kill();
   bot.stop();

@@ -164,10 +164,19 @@ async function initDatabase() {
     'cost_prem_3_uzs': '155000',
     'cost_prem_6_uzs': '207000',
     'cost_prem_12_uzs': '370000',
-    'ton_price_uzs': '20000',
-    'cost_ton_uzs': '18500',
+    'ton_price_uzs': '14000',
+    'cost_ton_uzs': '12000',
     'min_ton': '0.5',
-    'max_ton': '50'
+    'max_ton': '50',
+    'ton_auto_rate_enabled': 'true',
+    'ton_provider_spread_pct': '3',
+    'ton_markup_mode': 'fixed',
+    'ton_markup_uzs': '2000',
+    'ton_markup_pct': '15',
+    'ton_min_floor_uzs': '0',
+    'last_ton_usd': '',
+    'last_cbu_usd_uzs': '',
+    'ton_rate_snapshot': '{}'
   };
 
   for (const [key, val] of Object.entries(defaultSettings)) {

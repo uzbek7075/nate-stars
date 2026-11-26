@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="src/styles/main.css?v=16">
+  <link rel="stylesheet" href="src/styles/main.css?v=17">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     if (window.Telegram && window.Telegram.WebApp) {
@@ -465,6 +465,69 @@
           <div class="field-help" id="adminTonAddressHint" style="margin-top:6px;">Порог уведомления: 5 TON</div>
         </div>
 
+        <!-- TON Auto-Rate Card -->
+        <div class="glass-card admin-settings-card" id="tonAutoRateCard" style="margin-bottom: 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+            <h3 class="card-title" style="margin:0;">Автокурс TON (Asterium)</h3>
+            <button type="button" class="ghost-refresh-btn" id="refreshTonRateBtn" onclick="refreshAdminTonRate()">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
+              Обновить курс
+            </button>
+          </div>
+
+          <div class="auto-pay-banner" id="tonRateLiveBox" style="margin-bottom:12px;">
+            <div class="auto-pay-title" id="tonRateFormulaTitle">TON/USD + ЦБ Уз + спред провайдера</div>
+            <div class="auto-pay-text" id="tonRateFormulaBody">Загрузка данных курса...</div>
+          </div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingTonAutoRateEnabled">Режим курса TON</label>
+              <select id="settingTonAutoRateEnabled" class="form-control">
+                <option value="true">Авто (каждые 5 мин)</option>
+                <option value="false">Вручную</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingTonMarkupMode">Наценка сверху</label>
+              <select id="settingTonMarkupMode" class="form-control" onchange="onTonMarkupModeChange()">
+                <option value="fixed">Фикс (+сум)</option>
+                <option value="percent">Процент (+%)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingTonMarkupUzs">Фикс наценка (сум)</label>
+              <input type="number" id="settingTonMarkupUzs" class="form-control" placeholder="2000">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingTonMarkupPct">Наценка (%)</label>
+              <input type="number" step="0.5" id="settingTonMarkupPct" class="form-control" placeholder="15">
+            </div>
+          </div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingTonProviderSpread">Спред Asterium (%)</label>
+              <input type="number" step="0.1" id="settingTonProviderSpread" class="form-control" placeholder="3">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingTonMinFloor">Нижний стоп (0=нет)</label>
+              <input type="number" id="settingTonMinFloor" class="form-control" placeholder="0">
+            </div>
+          </div>
+
+          <button type="button" class="cta-secondary-btn" onclick="saveAdminSettings()">
+            <span>Сохранить параметры автокурса</span>
+          </button>
+        </div>
+
         <!-- Profit Analytics Card -->
         <div class="glass-card profit-card" id="adminProfitCard">
           <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
@@ -916,8 +979,8 @@
 
   <div class="toast-notification" id="toast"></div>
 
-  <script src="src/utils/api.js?v=16"></script>
-  <script src="src/utils/helpers.js?v=16"></script>
-  <script src="src/app.js?v=16"></script>
+  <script src="src/utils/api.js?v=17"></script>
+  <script src="src/utils/helpers.js?v=17"></script>
+  <script src="src/app.js?v=17"></script>
 </body>
 </html>

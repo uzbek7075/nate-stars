@@ -875,6 +875,8 @@ function switchTab(tab) {
     loadOrders();
   } else if (tab === 'admin') {
     loadAdminInfo();
+  } else if (tab === 'ton') {
+    loadCatalog();
   }
 }
 
@@ -1022,7 +1024,7 @@ async function loadAdminInfo() {
 
   try {
     const data = await API.getAdminInfo();
-    const { settings, stats, pendingOrders, profitStats, broadcastStats, walletBalance } = data;
+    const { settings, stats, pendingOrders, profitStats, broadcastStats, walletBalance, tonRateInfo } = data;
 
     // Метрики
     const totalEl = document.getElementById('adminMetricTotal');
@@ -1036,6 +1038,9 @@ async function loadAdminInfo() {
     // Баланс TON и порог
     cachedLowTonThreshold = Number(settings.low_ton_threshold || 5);
     renderAdminTonBalance(walletBalance, cachedLowTonThreshold);
+
+    // Автокурс TON
+    renderTonRateInfo(tonRateInfo, settings);
 
     // Статистика прибыли
     cachedProfitStats = profitStats || null;
@@ -1072,9 +1077,23 @@ async function loadAdminInfo() {
     const sTonPrice = document.getElementById('settingTonPrice');
     const sMinTon = document.getElementById('settingMinTon');
     const sCostTon = document.getElementById('settingCostTon');
-    if (sTonPrice) sTonPrice.value = settings.ton_price_uzs || 20000;
+    if (sTonPrice) sTonPrice.value = settings.ton_price_uzs || 14000;
     if (sMinTon) sMinTon.value = settings.min_ton || 0.5;
-    if (sCostTon) sCostTon.value = settings.cost_ton_uzs || 18500;
+    if (sCostTon) sCostTon.value = settings.cost_ton_uzs || 12000;
+
+    const sTonAuto = document.getElementById('settingTonAutoRateEnabled');
+    const sTonMode = document.getElementById('settingTonMarkupMode');
+    const sTonMarkupUzs = document.getElementById('settingTonMarkupUzs');
+    const sTonMarkupPct = document.getElementById('settingTonMarkupPct');
+    const sTonSpread = document.getElementById('settingTonProviderSpread');
+    const sTonFloor = document.getElementById('settingTonMinFloor');
+    if (sTonAuto) sTonAuto.value = settings.ton_auto_rate_enabled === 'false' ? 'false' : 'true';
+    if (sTonMode) sTonMode.value = settings.ton_markup_mode === 'percent' ? 'percent' : 'fixed';
+    if (sTonMarkupUzs) sTonMarkupUzs.value = settings.ton_markup_uzs ?? 2000;
+    if (sTonMarkupPct) sTonMarkupPct.value = settings.ton_markup_pct ?? 15;
+    if (sTonSpread) sTonSpread.value = settings.ton_provider_spread_pct ?? 3;
+    if (sTonFloor) sTonFloor.value = settings.ton_min_floor_uzs ?? 0;
+    onTonMarkupModeChange();
 
     // Настройки Fragment
     const fragConfig = data.fragmentConfig || {};
@@ -1566,6 +1585,12 @@ async function saveAdminSettings() {
   const tonPriceUzs = document.getElementById('settingTonPrice')?.value;
   const minTon = document.getElementById('settingMinTon')?.value;
   const costTonUzs = document.getElementById('settingCostTon')?.value;
+  const tonAutoRateEnabled = document.getElementById('settingTonAutoRateEnabled')?.value === 'true';
+  const tonMarkupMode = document.getElementById('settingTonMarkupMode')?.value || 'fixed';
+  const tonMarkupUzs = document.getElementById('settingTonMarkupUzs')?.value;
+  const tonMarkupPct = document.getElementById('settingTonMarkupPct')?.value;
+  const tonProviderSpreadPct = document.getElementById('settingTonProviderSpread')?.value;
+  const tonMinFloorUzs = document.getElementById('settingTonMinFloor')?.value;
 
   try {
     const res = await API.updateAdminSettings({
@@ -1587,7 +1612,12 @@ async function saveAdminSettings() {
       costPrem12Uzs,
       tonPriceUzs,
       minTon,
-      costTonUzs
+      costTonUzs,
+      tonAutoRateEnabled,
+      tonMarkupMode,
+      tonMarkupUzs,
+      tonMarkupPct,
+      tonMinFloorUzs
     });
 
     Helpers.haptic('success');
@@ -1721,6 +1751,63 @@ async function refreshAdminTonBalance() {
     Helpers.showToast('Баланс TON обновлён');
   } catch (err) {
     Helpers.showToast(err.message || 'Не удалось обновить баланс TON');
+  }
+}
+
+function onTonMarkupModeChange() {
+  const mode = document.getElementById('settingTonMarkupMode')?.value || 'fixed';
+  const uzsInput = document.getElementById('settingTonMarkupUzs');
+  const pctInput = document.getElementById('settingTonMarkupPct');
+  if (uzsInput) uzsInput.style.borderColor = mode === 'fixed' ? 'var(--blue-hi)' : '';
+  if (pctInput) pctInput.style.borderColor = mode === 'percent' ? 'var(--blue-hi)' : '';
+}
+
+function renderTonRateInfo(info, settings = {}) {
+  const titleEl = document.getElementById('tonRateFormulaTitle');
+  const bodyEl = document.getElementById('tonRateFormulaBody');
+  if (!titleEl || !bodyEl) return;
+
+  const autoOn = (info?.autoEnabled ?? (settings.ton_auto_rate_enabled !== 'false'));
+  if (!info || !info.tonUsd) {
+    titleEl.textContent = autoOn ? 'Автокурс TON активен' : 'Автокурс отключён (ручной режим)';
+    bodyEl.textContent = 'Нажмите «Обновить курс», чтобы подтянуть свежие данные TON/USD и ЦБ Уз.';
+    return;
+  }
+
+  const markupStr = info.markupMode === 'percent'
+    ? `+${info.markupPct}%`
+    : `+${Helpers.formatUzs(info.markupUzs)}`;
+  titleEl.textContent = autoOn
+    ? `Авто (${markupStr}) → Витрина: ${Helpers.formatUzs(info.effectivePriceUzs)}`
+    : `Вручную → Витрина: ${Helpers.formatUzs(settings.ton_price_uzs || info.effectivePriceUzs)}`;
+
+  const floorNote = info.minFloorUzs > 0 ? ` · Стоп ≥ ${Helpers.formatUzs(info.minFloorUzs)}` : '';
+  bodyEl.innerHTML =
+    `TON: <b>$${info.tonUsd}</b> (${escapeHtmlSafe(info.tonSource || '')}) × ЦБ: <b>${info.usdUzs}</b> + ${info.providerSpreadPct}% спред ` +
+    `= Закуп <b>${Helpers.formatUzs(info.purchaseCostUzs)}</b>${floorNote}`;
+}
+
+async function refreshAdminTonRate() {
+  const btn = document.getElementById('refreshTonRateBtn');
+  Helpers.haptic('light');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await API.refreshAdminTonRate();
+    renderTonRateInfo(res.tonRateInfo, res.settings);
+    if (res.settings) {
+      const sTonPrice = document.getElementById('settingTonPrice');
+      const sCostTon = document.getElementById('settingCostTon');
+      if (sTonPrice) sTonPrice.value = res.settings.ton_price_uzs;
+      if (sCostTon) sCostTon.value = res.settings.cost_ton_uzs;
+    }
+    await loadCatalog();
+    Helpers.haptic('success');
+    Helpers.showToast(`Курс обновлён: 1 TON = ${Helpers.formatUzs(res.tonRateInfo?.effectivePriceUzs)}`);
+  } catch (err) {
+    Helpers.haptic('error');
+    Helpers.showToast(err.message || 'Ошибка обновления курса');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
