@@ -26,13 +26,22 @@ let catalog = {
   tonPriceUzs: 14000,
   minTon: 0.2,
   maxTon: 50,
-  autoConfirmEnabled: false
+  autoConfirmEnabled: false,
+  paynetEnabled: true,
+  paynetFeePct: 3,
+  paynetTtlMinutes: 10,
+  paynetMinCashUzs: 5000,
+  paynetTarget: ''
 };
 
 let starsAmount = 100;
 let tonAmount = 1;
+let userBalanceUzs = 0;
 let pendingOrder = null;
 let orderPollTimer = null;
+let activePaynetTopup = null;
+let paynetTimerInterval = null;
+let paynetPollInterval = null;
 let cxQrPollTimer = null;
 let cachedCxStatus = null;
 let recipientPreviewTimer = null;
@@ -94,6 +103,10 @@ async function initApp() {
       const adminBtn = document.getElementById('adminTabBtn');
       if (adminBtn) adminBtn.style.display = 'flex';
     }
+    userBalanceUzs = Number(userData.balanceUzs ?? userData.user?.balance_uzs ?? 0);
+    const activeTopups = Array.isArray(userData.activeTopups) ? userData.activeTopups : [];
+    activePaynetTopup = activeTopups.length > 0 ? activeTopups[0] : null;
+    renderUserBalanceUI();
     renderActiveOrderBanner(userData.activeOrders || []);
   } catch (e) {
     if (currentTgId === 5379376281) {
@@ -104,6 +117,7 @@ async function initApp() {
 
   await loadCatalog();
   updateStarsCalc();
+  renderUserBalanceUI();
 
   const autoConfirmSel = document.getElementById('settingAutoConfirmEnabled');
   if (autoConfirmSel) {
@@ -164,8 +178,23 @@ function applyCatalogToUI() {
     tonInputEl.min = String(catalog.minTon || 0.2);
   }
 
+  renderUserBalanceUI();
   updateStarsCalc();
   updateTonCalc();
+}
+
+function renderUserBalanceUI() {
+  const chip = document.getElementById('headerBalanceChip');
+  const text = document.getElementById('headerBalanceText');
+  const modalBal = document.getElementById('paynetModalCurBalance');
+  const balFormatted = Helpers.formatUzs(userBalanceUzs);
+
+  if (text) text.textContent = balFormatted;
+  if (modalBal) modalBal.textContent = balFormatted;
+  if (chip) {
+    const visible = Boolean(catalog.paynetEnabled || userBalanceUzs > 0);
+    chip.style.display = visible ? 'inline-flex' : 'none';
+  }
 }
 
 // ===== Калькулятор TON =====
@@ -489,35 +518,47 @@ function validateRecipientForCheckout(recipient) {
 
 // ===== Чекаут =====
 
+async function preparePendingOrderFromServer(useBalance = false) {
+  if (!pendingOrder) return;
+  pendingOrder.useBalance = Boolean(useBalance);
+  try {
+    const prep = await API.prepareOrder({
+      recipientUsername: pendingOrder.recipient,
+      type: pendingOrder.type,
+      amount: pendingOrder.amount,
+      tonMemo: pendingOrder.tonMemo,
+      useBalance: pendingOrder.useBalance
+    });
+    if (prep && prep.order) {
+      pendingOrder.id = prep.order.id;
+      pendingOrder.priceUzs = prep.order.priceUzs;
+      pendingOrder.balanceUsedUzs = Number(prep.order.balanceUsedUzs || 0);
+      pendingOrder.totalPriceUzs = Number(prep.order.totalPriceUzs || prep.order.priceUzs);
+      pendingOrder.autoConfirm = Boolean(prep.autoConfirm);
+    }
+  } catch (err) {
+    console.warn('Fallback локальной суммы (prepareOrder):', err.message);
+  }
+}
+
 async function startCheckoutFlow(type, amount, fallbackPrice, itemDesc, recipient, tonMemo = '') {
   const recipientDisplay = type === 'ton' ? String(recipient || '').trim() : ('@' + recipient);
   pendingOrder = {
     id: null,
     type,
     amount,
+    baseOrderPrice: fallbackPrice,
     priceUzs: fallbackPrice,
+    totalPriceUzs: fallbackPrice,
+    balanceUsedUzs: 0,
+    useBalance: false,
     itemDesc,
     recipient: recipientDisplay,
     tonMemo: String(tonMemo || '').trim(),
     autoConfirm: Boolean(catalog.autoConfirmEnabled)
   };
 
-  try {
-    const prep = await API.prepareOrder({
-      recipientUsername: recipientDisplay,
-      type,
-      amount,
-      tonMemo: pendingOrder.tonMemo
-    });
-    if (prep && prep.order) {
-      pendingOrder.id = prep.order.id;
-      pendingOrder.priceUzs = prep.order.priceUzs;
-      pendingOrder.autoConfirm = Boolean(prep.autoConfirm);
-    }
-  } catch (err) {
-    console.warn('Fallback локальной суммы (prepareOrder):', err.message);
-  }
-
+  await preparePendingOrderFromServer(false);
   showCheckoutModal();
 }
 
@@ -584,15 +625,9 @@ async function openTonCheckout() {
   startCheckoutFlow('ton', tonAmount, price, `${tonAmount} TON`, rawAddr, memo);
 }
 
-function showCheckoutModal() {
-  Helpers.haptic('medium');
-
-  document.getElementById('modalItemDesc').textContent = pendingOrder.itemDesc;
-  document.getElementById('modalRecipient').textContent = pendingOrder.recipient;
+function updateCheckoutAmountsAndBalanceUI() {
+  if (!pendingOrder) return;
   document.getElementById('modalPrice').textContent = Helpers.formatUzs(pendingOrder.priceUzs);
-  document.getElementById('modalCardNumber').textContent = Helpers.formatCardNumber(catalog.cardNumber);
-  document.getElementById('modalCardHolder').textContent = catalog.cardHolder;
-  document.getElementById('senderCommentInput').value = '';
 
   const autoBanner = document.getElementById('autoPayNotice');
   const autoSumEl = document.getElementById('autoPayExactSum');
@@ -605,12 +640,121 @@ function showCheckoutModal() {
     }
   }
 
+  const box = document.getElementById('balanceCheckoutBox');
+  const fullBox = document.getElementById('balanceCheckoutFull');
+  const partialBox = document.getElementById('balanceCheckoutPartial');
+  const fullAvailEl = document.getElementById('balanceCheckoutAvailFull');
+  const payBalBtn = document.getElementById('payWithBalanceBtn');
+  const partialCheck = document.getElementById('usePartialBalanceCheck');
+  const partialLabel = document.getElementById('balancePartialLabel');
+  const paynetAltBtn = document.getElementById('checkoutPaynetAltBtn');
+
+  const baseNeed = Number(pendingOrder.baseOrderPrice || pendingOrder.priceUzs);
+  const canPartialAmount = Math.min(userBalanceUzs, Math.max(0, baseNeed - 1000));
+
+  if (box) {
+    if (userBalanceUzs >= baseNeed) {
+      box.style.display = 'block';
+      if (fullBox) fullBox.style.display = 'block';
+      if (partialBox) partialBox.style.display = 'none';
+      if (fullAvailEl) fullAvailEl.textContent = Helpers.formatUzs(userBalanceUzs);
+      if (payBalBtn) payBalBtn.innerHTML = `<span>⚡ Оплатить с баланса (${Helpers.formatUzs(baseNeed)})</span>`;
+    } else if (userBalanceUzs > 0 && canPartialAmount > 0) {
+      box.style.display = 'block';
+      if (fullBox) fullBox.style.display = 'none';
+      if (partialBox) partialBox.style.display = 'block';
+      if (partialCheck) partialCheck.checked = Boolean(pendingOrder.useBalance);
+      if (partialLabel) {
+        partialLabel.textContent = `Списать с баланса (-${Helpers.formatUzs(canPartialAmount)}) и доплатить картой`;
+      }
+    } else {
+      box.style.display = 'none';
+    }
+  }
+
+  if (paynetAltBtn) {
+    paynetAltBtn.style.display = (catalog.paynetEnabled && userBalanceUzs < baseNeed) ? 'block' : 'none';
+  }
+}
+
+function showCheckoutModal() {
+  Helpers.haptic('medium');
+
+  document.getElementById('modalItemDesc').textContent = pendingOrder.itemDesc;
+  document.getElementById('modalRecipient').textContent = pendingOrder.recipient;
+  document.getElementById('modalCardNumber').textContent = Helpers.formatCardNumber(catalog.cardNumber);
+  document.getElementById('modalCardHolder').textContent = catalog.cardHolder;
+  document.getElementById('senderCommentInput').value = '';
+
+  updateCheckoutAmountsAndBalanceUI();
+
   const modal = document.getElementById('checkoutModal');
   if (modal) modal.classList.add('show');
 
   if (pendingOrder.id && pendingOrder.autoConfirm) {
     startOrderStatusPolling(pendingOrder.id);
   }
+}
+
+async function togglePartialBalance() {
+  const checked = Boolean(document.getElementById('usePartialBalanceCheck')?.checked);
+  if (!pendingOrder) return;
+  Helpers.haptic('light');
+  await preparePendingOrderFromServer(checked);
+  updateCheckoutAmountsAndBalanceUI();
+  if (pendingOrder.id && pendingOrder.autoConfirm) {
+    startOrderStatusPolling(pendingOrder.id);
+  }
+}
+
+async function submitBalanceOrderPayment() {
+  if (!pendingOrder) return;
+  const btn = document.getElementById('payWithBalanceBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span>⚡ Оплата с баланса...</span>';
+  }
+
+  try {
+    const res = await API.payOrderWithBalance({
+      recipientUsername: pendingOrder.recipient,
+      type: pendingOrder.type,
+      amount: pendingOrder.amount,
+      tonMemo: pendingOrder.tonMemo || ''
+    });
+
+    if (typeof res.newBalanceUzs === 'number') {
+      userBalanceUzs = res.newBalanceUzs;
+      renderUserBalanceUI();
+    }
+
+    stopOrderStatusPolling();
+    showSuccessState({
+      id: res.order.id,
+      itemDescription: res.order.itemDescription || pendingOrder.itemDesc,
+      recipientUsername: res.order.recipientUsername || pendingOrder.recipient,
+      priceUzs: res.order.priceUzs || pendingOrder.baseOrderPrice,
+      deliveryState: res.deliveryState || res.order.status || 'paid_processing'
+    });
+    refreshActiveBannerFromServer();
+  } catch (err) {
+    Helpers.haptic('error');
+    Helpers.showToast(err.message || 'Ошибка оплаты с баланса');
+    updateCheckoutAmountsAndBalanceUI();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function switchCheckoutToPaynet() {
+  const needBase = pendingOrder ? Math.max(0, Number(pendingOrder.baseOrderPrice || pendingOrder.priceUzs) - userBalanceUzs) : 0;
+  const feePct = Number(catalog.paynetFeePct ?? 3);
+  const minCash = Number(catalog.paynetMinCashUzs || 5000);
+  const suggestedCash = needBase > 0
+    ? Math.max(minCash, Math.ceil((needBase / (1 - feePct / 100)) / 1000) * 1000)
+    : Math.max(minCash, 20000);
+  closeCheckout();
+  openPaynetModal(suggestedCash);
 }
 
 function stopOrderStatusPolling() {
@@ -683,6 +827,10 @@ function renderActiveOrderBanner(activeOrders) {
 async function refreshActiveBannerFromServer() {
   try {
     const userData = await API.getUser();
+    userBalanceUzs = Number(userData.balanceUzs ?? userData.user?.balance_uzs ?? 0);
+    const activeTopups = Array.isArray(userData.activeTopups) ? userData.activeTopups : [];
+    activePaynetTopup = activeTopups.length > 0 ? activeTopups[0] : null;
+    renderUserBalanceUI();
     renderActiveOrderBanner(userData.activeOrders || []);
   } catch (e) {}
 }
@@ -850,6 +998,297 @@ function closeSuccessModal() {
   const modal = document.getElementById('successModal');
   if (modal) modal.classList.remove('show');
   switchTab('orders');
+}
+
+// ===== Пополнение баланса наличными через Paynet (таймер 10 минут) =====
+
+function stopPaynetTimers() {
+  if (paynetTimerInterval) {
+    clearInterval(paynetTimerInterval);
+    paynetTimerInterval = null;
+  }
+  if (paynetPollInterval) {
+    clearInterval(paynetPollInterval);
+    paynetPollInterval = null;
+  }
+}
+
+function setPaynetView(mode) {
+  const createView = document.getElementById('paynetCreateView');
+  const activeView = document.getElementById('paynetActiveView');
+  const successView = document.getElementById('paynetSuccessView');
+  if (createView) createView.style.display = mode === 'create' ? 'block' : 'none';
+  if (activeView) activeView.style.display = mode === 'active' ? 'block' : 'none';
+  if (successView) successView.style.display = mode === 'success' ? 'block' : 'none';
+}
+
+async function openPaynetModal(prefillCash = null) {
+  Helpers.haptic('light');
+  renderUserBalanceUI();
+
+  const busyBox = document.getElementById('paynetBusyAlert');
+  if (busyBox) busyBox.style.display = 'none';
+
+  const modal = document.getElementById('paynetModal');
+  if (modal) modal.classList.add('show');
+
+  // Подтягиваем актуальный статус, если есть активная заявка в работе
+  try {
+    const u = await API.getUser();
+    userBalanceUzs = Number(u.balanceUzs ?? u.user?.balance_uzs ?? userBalanceUzs);
+    const activeTopups = Array.isArray(u.activeTopups) ? u.activeTopups : [];
+    activePaynetTopup = activeTopups.length > 0 ? activeTopups[0] : null;
+    renderUserBalanceUI();
+  } catch (e) {}
+
+  if (!prefillCash && activePaynetTopup && (activePaynetTopup.status === 'awaiting_payment' || activePaynetTopup.status === 'pending')) {
+    const expMs = Date.parse(activePaynetTopup.expires_at);
+    if (activePaynetTopup.status === 'pending' || (!isNaN(expMs) && expMs > Date.now())) {
+      showActivePaynetTopup(activePaynetTopup);
+      return;
+    }
+  }
+
+  stopPaynetTimers();
+  setPaynetView('create');
+  const minCash = Number(catalog.paynetMinCashUzs || 5000);
+  const targetCash = prefillCash ? Math.max(minCash, Math.ceil(Number(prefillCash) / 1000) * 1000) : Math.max(minCash, 20000);
+  setPaynetCash(targetCash);
+}
+
+function closePaynetModal() {
+  stopPaynetTimers();
+  const modal = document.getElementById('paynetModal');
+  if (modal) modal.classList.remove('show');
+}
+
+function setPaynetCash(cash) {
+  const input = document.getElementById('paynetCashInput');
+  if (input) input.value = String(cash);
+  document.querySelectorAll('.paynet-preset-pill').forEach(btn => {
+    const val = parseInt(btn.textContent.replace(/\s+/g, ''), 10);
+    btn.classList.toggle('active', val === Number(cash));
+  });
+  const busyBox = document.getElementById('paynetBusyAlert');
+  if (busyBox) busyBox.style.display = 'none';
+  updatePaynetPreview();
+}
+
+function updatePaynetPreview() {
+  const input = document.getElementById('paynetCashInput');
+  const raw = Math.max(0, Math.round(Number(input?.value || 0)));
+  const feePct = Number(catalog.paynetFeePct ?? 3);
+  const net = Math.round(raw * (1 - feePct / 100));
+  const fee = Math.max(0, raw - net);
+
+  const cEl = document.getElementById('paynetPrevCash');
+  const flEl = document.getElementById('paynetPrevFeePctLabel');
+  const fEl = document.getElementById('paynetPrevFee');
+  const nEl = document.getElementById('paynetPrevNet');
+  const btn = document.getElementById('paynetCreateBtn');
+
+  if (cEl) cEl.textContent = Helpers.formatUzs(raw);
+  if (flEl) flEl.textContent = String(feePct);
+  if (fEl) fEl.textContent = `-${Helpers.formatUzs(fee)}`;
+  if (nEl) nEl.textContent = Helpers.formatUzs(net);
+  if (btn) {
+    const ttl = Number(catalog.paynetTtlMinutes || 10);
+    btn.innerHTML = `<span>Получить карту (таймер ${ttl} мин)</span>`;
+  }
+
+  document.querySelectorAll('.paynet-preset-pill').forEach(b => {
+    const val = parseInt(b.textContent.replace(/\s+/g, ''), 10);
+    b.classList.toggle('active', val === raw);
+  });
+}
+
+async function submitCreatePaynetTopup(overrideCash = null) {
+  const input = document.getElementById('paynetCashInput');
+  const cashAmount = Math.round(Number(overrideCash || input?.value || 0));
+  const minCash = Number(catalog.paynetMinCashUzs || 5000);
+
+  if (!Number.isFinite(cashAmount) || cashAmount < minCash) {
+    Helpers.haptic('error');
+    return Helpers.showToast(`Минимальная сумма: ${Helpers.formatUzs(minCash)}`);
+  }
+  if (cashAmount % 1000 !== 0) {
+    Helpers.haptic('error');
+    return Helpers.showToast('Сумма для терминала должна быть кратна 1 000 сум');
+  }
+
+  const btn = document.getElementById('paynetCreateBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span>⏳ Выдача реквизитов...</span>';
+  }
+
+  try {
+    const res = await API.createPaynetTopup(cashAmount);
+    if (res && res.topup) {
+      activePaynetTopup = res.topup;
+      Helpers.haptic('medium');
+      showActivePaynetTopup(res.topup);
+    }
+  } catch (err) {
+    Helpers.haptic('error');
+    if (err.data && err.data.code === 'SUM_BUSY') {
+      const busyBox = document.getElementById('paynetBusyAlert');
+      const busyText = document.getElementById('paynetBusyText');
+      const sugWrap = document.getElementById('paynetBusySuggestions');
+      const mins = Math.ceil(Number(err.data.retryAfterSec || 120) / 60);
+      if (busyText) {
+        busyText.textContent = `Сумма ${Helpers.formatUzs(cashAmount)} сейчас занята другим пополнением (освободится через ~${mins} мин). Выберите другую сумму или подождите:`;
+      }
+      if (sugWrap) {
+        const list = Array.isArray(err.data.suggestedAmounts) ? err.data.suggestedAmounts : [];
+        sugWrap.innerHTML = list.map(s => `
+          <button type="button" class="budget-pill" style="flex:0 0 auto; padding:7px 11px;" onclick="setPaynetCash(${s.cashAmount}); submitCreatePaynetTopup(${s.cashAmount});">
+            Внести ${Helpers.formatUzs(s.cashAmount)}
+          </button>
+        `).join('');
+      }
+      if (busyBox) busyBox.style.display = 'block';
+    } else {
+      Helpers.showToast(err.message || 'Не удалось создать заявку Paynet');
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      updatePaynetPreview();
+    }
+  }
+}
+
+function showActivePaynetTopup(topup) {
+  activePaynetTopup = topup;
+  setPaynetView('active');
+
+  const rawTarget = String(topup.paynet_target || topup.paynetTarget || topup.card_number || catalog.cardNumber || '');
+  const formattedTarget = /^\d{16}$/.test(rawTarget.replace(/\s+/g, ''))
+    ? Helpers.formatCardNumber(rawTarget)
+    : rawTarget;
+
+  const cashEl = document.getElementById('paynetActiveCash');
+  const expEl = document.getElementById('paynetActiveExpected');
+  const targEl = document.getElementById('paynetActiveTarget');
+  if (cashEl) cashEl.textContent = Helpers.formatUzs(topup.cash_amount_uzs || topup.cashAmountUzs);
+  if (expEl) expEl.textContent = Helpers.formatUzs(topup.expected_card_uzs || topup.expectedCardUzs);
+  if (targEl) targEl.textContent = formattedTarget;
+
+  const cancelBtn = document.getElementById('paynetCancelBtn');
+  if (cancelBtn) cancelBtn.style.display = topup.status === 'awaiting_payment' ? 'flex' : 'none';
+
+  startPaynetCountdownAndPolling(topup);
+}
+
+function startPaynetCountdownAndPolling(topup) {
+  stopPaynetTimers();
+
+  const banner = document.getElementById('paynetTimerBanner');
+  const label = document.getElementById('paynetTimerLabel');
+  const clock = document.getElementById('paynetTimerCountdown');
+  const expMs = Date.parse(topup.expires_at);
+
+  const tickTimer = () => {
+    if (activePaynetTopup?.status === 'pending') {
+      if (banner) banner.classList.remove('expired');
+      if (label) label.textContent = '⏳ Проверяем поступление платежа...';
+      if (clock) clock.textContent = 'Проверка';
+      return;
+    }
+    const leftSec = Math.max(0, Math.floor((expMs - Date.now()) / 1000));
+    const mm = String(Math.floor(leftSec / 60)).padStart(2, '0');
+    const ss = String(leftSec % 60).padStart(2, '0');
+    if (clock) clock.textContent = `${mm}:${ss}`;
+    if (leftSec <= 0) {
+      if (banner) banner.classList.add('expired');
+      if (label) label.textContent = '⚠️ Время истекло — если внёсли деньги, нажмите ниже';
+    } else {
+      if (banner) banner.classList.remove('expired');
+      if (label) label.textContent = '⏳ Реквизиты действуют';
+    }
+  };
+
+  tickTimer();
+  paynetTimerInterval = setInterval(tickTimer, 1000);
+
+  paynetPollInterval = setInterval(async () => {
+    if (!activePaynetTopup?.id) return;
+    try {
+      const st = await API.getTopupStatus(activePaynetTopup.id);
+      if (st.status === 'confirmed') {
+        stopPaynetTimers();
+        userBalanceUzs = Number(st.balanceUzs ?? userBalanceUzs);
+        renderUserBalanceUI();
+        activePaynetTopup = null;
+        const credEl = document.getElementById('paynetSuccessCredited');
+        const totEl = document.getElementById('paynetSuccessTotalBal');
+        if (credEl) credEl.textContent = '+' + Helpers.formatUzs(st.creditedUzs || st.expectedCardUzs);
+        if (totEl) totEl.textContent = Helpers.formatUzs(userBalanceUzs);
+        setPaynetView('success');
+        Helpers.haptic('success');
+      } else if (st.status === 'rejected' || st.status === 'cancelled') {
+        stopPaynetTimers();
+        activePaynetTopup = null;
+        Helpers.showToast(st.status === 'rejected' ? 'Заявка отклонена администратором' : 'Заявка отменена');
+        setPaynetView('create');
+      }
+    } catch (e) {}
+  }, 3000);
+}
+
+function copyPaynetTarget() {
+  const txt = document.getElementById('paynetActiveTarget')?.textContent?.replace(/\s+/g, '') || '';
+  if (txt) Helpers.copyText(txt, 'Реквизиты скопированы');
+}
+
+function copyPaynetCash() {
+  if (!activePaynetTopup) return;
+  const val = String(activePaynetTopup.cash_amount_uzs || activePaynetTopup.cashAmountUzs || '');
+  if (val) Helpers.copyText(val, `Сумма ${Helpers.formatUzs(val)} скопирована`);
+}
+
+async function markPaynetPaid() {
+  if (!activePaynetTopup?.id) return;
+  const btn = document.getElementById('paynetMarkPaidBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span>⏳ Проверка...</span>'; }
+  try {
+    const res = await API.markPaynetTopupPaid(activePaynetTopup.id);
+    if (res.alreadyConfirmed) {
+      userBalanceUzs = Number(res.balanceUzs ?? userBalanceUzs);
+      renderUserBalanceUI();
+      stopPaynetTimers();
+      activePaynetTopup = null;
+      const credEl = document.getElementById('paynetSuccessCredited');
+      const totEl = document.getElementById('paynetSuccessTotalBal');
+      if (credEl) credEl.textContent = '+' + Helpers.formatUzs(res.topup?.credited_uzs || res.topup?.expected_card_uzs || 0);
+      if (totEl) totEl.textContent = Helpers.formatUzs(userBalanceUzs);
+      setPaynetView('success');
+      return;
+    }
+    activePaynetTopup = res.topup;
+    const cancelBtn = document.getElementById('paynetCancelBtn');
+    if (cancelBtn) cancelBtn.style.display = 'none';
+    Helpers.haptic('success');
+    Helpers.showToast('Запрос передан на проверку! Как только деньги поступят — баланс обновится.');
+  } catch (err) {
+    Helpers.showToast(err.message || 'Ошибка проверки');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<span>Я уже внёс наличные</span>'; }
+  }
+}
+
+async function cancelActivePaynetTopup() {
+  if (!activePaynetTopup?.id) return;
+  try {
+    await API.cancelPaynetTopup(activePaynetTopup.id);
+    stopPaynetTimers();
+    activePaynetTopup = null;
+    Helpers.showToast('Заявка отменена');
+    setPaynetView('create');
+  } catch (err) {
+    Helpers.showToast(err.message || 'Не удалось отменить');
+  }
 }
 
 // ===== Вкладки =====
@@ -1125,6 +1564,9 @@ async function loadAdminInfo() {
 
     // Статус CardXabar
     renderCardXabarStatus(data.cardXabarStatus || {});
+
+    // Настройки и заявки Paynet + балансы пользователей
+    renderAdminPaynetSection(settings, data.pendingTopups || [], data.usersWithBalance || []);
 
     // Ожидающие заказы
     if (pendingContainer) {
@@ -1596,6 +2038,12 @@ async function saveAdminSettings() {
   const tonMarkupPct = document.getElementById('settingTonMarkupPct')?.value;
   const tonProviderSpreadPct = document.getElementById('settingTonProviderSpread')?.value;
   const tonMinFloorUzs = document.getElementById('settingTonMinFloor')?.value;
+  const paynetEnabled = document.getElementById('settingPaynetEnabled')?.value === 'true';
+  const paynetFeePct = document.getElementById('settingPaynetFeePct')?.value;
+  const paynetTtlMinutes = document.getElementById('settingPaynetTtlMinutes')?.value;
+  const paynetMinCashUzs = document.getElementById('settingPaynetMinCashUzs')?.value;
+  const paynetTarget = document.getElementById('settingPaynetTarget')?.value;
+  const paynetCards = document.getElementById('settingPaynetCards')?.value;
 
   try {
     const res = await API.updateAdminSettings({
@@ -1622,7 +2070,13 @@ async function saveAdminSettings() {
       tonMarkupMode,
       tonMarkupUzs,
       tonMarkupPct,
-      tonMinFloorUzs
+      tonMinFloorUzs,
+      paynetEnabled,
+      paynetFeePct,
+      paynetTtlMinutes,
+      paynetMinCashUzs,
+      paynetTarget,
+      paynetCards
     });
 
     Helpers.haptic('success');
@@ -1643,6 +2097,122 @@ async function saveAdminSettings() {
       fBtn.disabled = false;
       fBtn.innerHTML = '<span>Сохранить настройки Fragment</span>';
     }
+  }
+}
+
+function renderAdminPaynetSection(settings = {}, topups = [], usersWithBalance = []) {
+  const badge = document.getElementById('paynetAdminStatusBadge');
+  const pEnabled = document.getElementById('settingPaynetEnabled');
+  const pFee = document.getElementById('settingPaynetFeePct');
+  const pTtl = document.getElementById('settingPaynetTtlMinutes');
+  const pMin = document.getElementById('settingPaynetMinCashUzs');
+  const pTarget = document.getElementById('settingPaynetTarget');
+  const pCards = document.getElementById('settingPaynetCards');
+
+  const enabled = settings.paynet_enabled !== 'false';
+  if (pEnabled) pEnabled.value = enabled ? 'true' : 'false';
+  if (pFee) pFee.value = settings.paynet_fee_pct ?? 3;
+  if (pTtl) pTtl.value = settings.paynet_ttl_minutes ?? 10;
+  if (pMin) pMin.value = settings.paynet_min_cash_uzs ?? 5000;
+  if (pTarget) pTarget.value = settings.paynet_target ?? '';
+  if (pCards) pCards.value = settings.paynet_cards ?? '';
+
+  if (badge) {
+    badge.textContent = enabled ? 'Вкл' : 'Выкл';
+    badge.className = `status-badge-clean ${enabled ? 'confirmed' : 'rejected'}`;
+  }
+
+  const topupsList = document.getElementById('adminTopupsList');
+  if (topupsList) {
+    if (!topups || topups.length === 0) {
+      topupsList.innerHTML = `<div class="field-help">Заявок на пополнение через Paynet пока нет</div>`;
+    } else {
+      topupsList.innerHTML = topups.slice(0, 10).map(t => {
+        const canAct = t.status === 'pending' || t.status === 'awaiting_payment' || t.status === 'expired';
+        const stLabel = t.status === 'confirmed'
+          ? '<span class="status-badge-clean confirmed">Зачислено</span>'
+          : t.status === 'pending'
+            ? '<span class="status-badge-clean processing">На проверке</span>'
+            : t.status === 'awaiting_payment'
+              ? '<span class="status-badge-clean pending">Таймер</span>'
+              : `<span class="status-badge-clean rejected">${escapeHtmlSafe(t.status)}</span>`;
+
+        return `
+          <div class="admin-order-card" style="padding:10px 12px;">
+            <div class="order-top" style="margin-bottom:6px;">
+              <span class="order-code">#${escapeHtmlSafe(t.id)} · ${escapeHtmlSafe(t.buyer_username || t.telegram_id)}</span>
+              ${stLabel}
+            </div>
+            <div style="font-size:0.75rem; color:var(--text-mute); margin-bottom:${canAct ? '8px' : '0'};">
+              Внесено: <strong style="color:#fff">${Helpers.formatUzs(t.cash_amount_uzs)}</strong> → к зачислению: <strong style="color:var(--ok)">${Helpers.formatUzs(t.expected_card_uzs)}</strong>
+            </div>
+            ${canAct ? `
+              <div class="admin-actions-row">
+                <button class="action-btn-confirm" onclick="handleAdminTopup('${t.id}', 'confirm')">✅ Зачислить</button>
+                <button class="action-btn-reject" onclick="handleAdminTopup('${t.id}', 'reject')">Отклонить</button>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  const balList = document.getElementById('adminUsersBalanceList');
+  if (balList) {
+    if (!usersWithBalance || usersWithBalance.length === 0) {
+      balList.innerHTML = `<div class="field-help">Пользователей с положительным балансом пока нет</div>`;
+    } else {
+      balList.innerHTML = usersWithBalance.slice(0, 15).map(u => `
+        <div class="cx-log-row">
+          <span>${u.username ? '@' + escapeHtmlSafe(u.username) : escapeHtmlSafe(u.first_name || 'ID')} <span style="opacity:0.6;">(${u.telegram_id})</span></span>
+          <strong style="color:var(--ok);">${Helpers.formatUzs(u.balance_uzs)}</strong>
+        </div>
+      `).join('');
+    }
+  }
+}
+
+async function handleAdminTopup(topupId, action) {
+  try {
+    await API.adminTopupAction(topupId, action);
+    Helpers.haptic('success');
+    Helpers.showToast(action === 'confirm' ? 'Баланс пользователя пополнен!' : 'Заявка отклонена');
+    await refreshActiveBannerFromServer();
+    loadAdminInfo();
+  } catch (err) {
+    Helpers.haptic('error');
+    Helpers.showToast(err.message || 'Ошибка обработки заявки');
+  }
+}
+
+async function submitAdminUserBalance() {
+  const idInput = document.getElementById('adminBalIdentifier');
+  const deltaInput = document.getElementById('adminBalDelta');
+  const noteInput = document.getElementById('adminBalNote');
+  const btn = document.getElementById('adminAdjustBalBtn');
+
+  const identifier = idInput?.value?.trim();
+  const deltaUzs = Number(deltaInput?.value || 0);
+  const note = noteInput?.value?.trim() || '';
+
+  if (!identifier) return Helpers.showToast('Укажите @username или Telegram ID');
+  if (!Number.isFinite(deltaUzs) || deltaUzs === 0) return Helpers.showToast('Укажите ненулевую сумму (+ или -)');
+
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span>Обновление...</span>'; }
+  try {
+    const res = await API.adminAdjustUserBalance(identifier, deltaUzs, note);
+    Helpers.haptic('success');
+    Helpers.showToast(`Готово! Новый баланс: ${Helpers.formatUzs(res.newBalanceUzs)}`);
+    if (deltaInput) deltaInput.value = '';
+    if (noteInput) noteInput.value = '';
+    await refreshActiveBannerFromServer();
+    loadAdminInfo();
+  } catch (err) {
+    Helpers.haptic('error');
+    Helpers.showToast(err.message || 'Не удалось обновить баланс');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<span>Обновить баланс пользователя</span>'; }
   }
 }
 

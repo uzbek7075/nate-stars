@@ -136,6 +136,33 @@ function calculateBasePrice(type, amount, settings) {
   throw new Error('Неизвестный тип товара');
 }
 
+function validateAndFormatRecipient(type, recipientUsername, tonMemo = '') {
+  if (type === 'ton') {
+    const addrCheck = parseAndValidateAddress(recipientUsername, {
+      ownWalletAddress: FragmentService.getConfig().walletAddress
+    });
+    if (!addrCheck.valid) {
+      throw new Error(addrCheck.reason || 'Некорректный TON-адрес');
+    }
+    return {
+      fullRecipient: addrCheck.rawInput,
+      cleanMemo: String(tonMemo || '').trim().slice(0, 120)
+    };
+  }
+
+  if (!recipientUsername) {
+    throw new Error('Укажите @username получателя');
+  }
+  const cleanUsername = String(recipientUsername).replace(/^@/, '').trim();
+  if (!cleanUsername) {
+    throw new Error('Некорректный username');
+  }
+  return {
+    fullRecipient: '@' + cleanUsername,
+    cleanMemo: ''
+  };
+}
+
 async function sendToAdminAndGroup(htmlMessage, extraOptions = {}) {
   const ordersChatId = dao.getSetting('orders_chat_id');
   if (ordersChatId) {
@@ -167,6 +194,10 @@ async function notifyAdminsOfPendingOrder(order) {
   const itemDesc = formatOrderItemDesc(order.type, order.amount);
   const memoLine = order.ton_memo ? `• <b>Memo / Tag:</b> <code>${escapeHtml(order.ton_memo)}</code>\n` : '';
   const recLabel = order.type === 'ton' ? 'Кошелёк' : 'Получатель';
+  const cardDue = Number(order.card_pay_uzs || 0) > 0 ? Number(order.card_pay_uzs) : Number(order.price_uzs);
+  const balLine = Number(order.balance_used_uzs || 0) > 0
+    ? `• <b>С баланса (при выдаче):</b> <code>${formatUzs(order.balance_used_uzs)}</code> | <b>На карту:</b> <code>${formatUzs(cardDue)}</code>\n`
+    : '';
 
   const adminMessage =
     `<b>НОВЫЙ ЗАКАЗ #${escapeHtml(order.id)}</b>\n\n` +
@@ -174,7 +205,8 @@ async function notifyAdminsOfPendingOrder(order) {
     `• <b>${recLabel}:</b> <code>${escapeHtml(order.recipient_username)}</code>\n` +
     memoLine +
     `• <b>Товар:</b> ${escapeHtml(itemDesc)}\n` +
-    `• <b>Сумма:</b> <code>${formatUzs(order.price_uzs)}</code>\n` +
+    `• <b>Общая сумма:</b> <code>${formatUzs(order.price_uzs)}</code>\n` +
+    balLine +
     `• <b>Карта оплаты:</b> <code>${escapeHtml(order.card_number)}</code>\n` +
     (order.sender_comment ? `• <b>Чек / отправитель:</b> ${escapeHtml(order.sender_comment)}\n` : '') +
     `\n<i>Статус: ожидает проверки платежа</i>`;
@@ -220,10 +252,23 @@ async function sendDeliveredClientMessage(order, txHash = '') {
 /**
  * Единая точка выполнения заказа (отправка через Fragment для Stars/Premium или блокчейн TON для TON).
  */
-async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual', cardXabarInfo = null, skipGroupNotice = false } = {}) {
+async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual', cardXabarInfo = null, skipGroupNotice = false, balanceAlreadyDebited = false } = {}) {
   const order = dao.getOrder(orderId);
   if (!order) return { ok: false, reason: 'not_found' };
   if (order.status === 'confirmed') return { ok: false, reason: 'already_confirmed', order };
+
+  // Если заказ с частичной оплатой балансом подтверждается приходом по карте/админом, списываем остаток баланса безопасно до выдачи
+  const plannedBalanceUsed = Number(order.balance_used_uzs || 0);
+  if (plannedBalanceUsed > 0 && !balanceAlreadyDebited && order.status !== 'paid_processing' && source !== 'balance' && source !== 'retry') {
+    const deb = dao.debitUserBalanceIfEnough(order.telegram_id, plannedBalanceUsed, 'order_partial', order.id);
+    if (!deb.ok) {
+      await sendToAdminAndGroup(
+        `⚠️ <b>Заказ #${escapeHtml(order.id)} — не хватило баланса для частичной оплаты!</b>\n` +
+        `Клиент ${escapeHtml(order.buyer_username)} (ID: <code>${order.telegram_id}</code>) ожидал списания <code>${formatUzs(plannedBalanceUsed)}</code> с баланса, но на счёте только <code>${formatUzs(deb.balance)}</code>. Автовыдача остановлена.`
+      ).catch(() => {});
+      return { ok: false, reason: 'insufficient_partial_balance', balance: deb.balance };
+    }
+  }
 
   // Сразу фиксируем статус 'paid_processing' (оплата получена), чтобы исключить гонку и потерю заказа
   dao.updateOrderStatus(orderId, 'paid_processing', source);
@@ -280,17 +325,24 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
 
     const header = source === 'cardxabar'
       ? `⚡ <b>АВТООПЛАТА CARDXABAR (#${escapeHtml(order.id)})</b>`
-      : source === 'retry'
-        ? `🔄 <b>ПОВТОРНАЯ ВЫДАЧА (#${escapeHtml(order.id)})</b> (${escapeHtml(confirmedBy)})`
-        : `✅ <b>ЗАКАЗ #${escapeHtml(order.id)} ПОДТВЕРЖДЁН</b> (${escapeHtml(confirmedBy)})`;
+      : source === 'balance'
+        ? `💼 <b>ОПЛАТА С БАЛАНСА (#${escapeHtml(order.id)})</b>`
+        : source === 'retry'
+          ? `🔄 <b>ПОВТОРНАЯ ВЫДАЧА (#${escapeHtml(order.id)})</b> (${escapeHtml(confirmedBy)})`
+          : `✅ <b>ЗАКАЗ #${escapeHtml(order.id)} ПОДТВЕРЖДЁН</b> (${escapeHtml(confirmedBy)})`;
 
     const cardLine = cardXabarInfo
       ? `💳 Зачислено: <code>+${formatUzs(cardXabarInfo.amount)}</code> (карта ***${escapeHtml(cardXabarInfo.cardLast4)})\n`
       : '';
 
+    const balUsedLine = Number(order.balance_used_uzs || 0) > 0
+      ? `• <b>Списано с баланса:</b> <code>${formatUzs(order.balance_used_uzs)}</code>\n`
+      : '';
+
     const groupMsg =
       `${header}\n\n` +
       cardLine +
+      balUsedLine +
       `• <b>Покупатель:</b> ${escapeHtml(order.buyer_username)}\n` +
       `• <b>${isTonOrder ? 'Кошелёк' : 'Получатель'}:</b> <code>${escapeHtml(order.recipient_username)}</code>\n` +
       (order.ton_memo ? `• <b>Memo:</b> <code>${escapeHtml(order.ton_memo)}</code>\n` : '') +
@@ -636,20 +688,76 @@ async function runAdminBroadcast({ text, photoFileId = null, includeOpenButton =
   }
 }
 
-async function handleCardXabarPayment({ amount, cardLast4, msgId, msgDateMs }) {
-  const order = dao.findOrderForCardXabarPayment(amount, msgDateMs);
-  if (!order) {
-    console.log(`ℹ️ [CardXabar] Пополнение +${amount} UZS (***${cardLast4}) — подходящих активных заказов нет.`);
-    return { matched: false };
+async function confirmAndCreditPaynetTopup(topupId, { creditedUzs, confirmedBy = 'Admin', source = 'manual', cardXabarInfo = null, skipGroupNotice = false } = {}) {
+  const existing = dao.getPaynetTopup(topupId);
+  if (!existing) return { ok: false, reason: 'not_found' };
+  if (existing.status === 'confirmed') return { ok: false, reason: 'already_confirmed', topup: existing };
+
+  const res = dao.confirmPaynetTopup(topupId, creditedUzs || existing.expected_card_uzs);
+  if (!res.ok) return res;
+
+  const t = res.topup;
+  const userMsg =
+    `💵 <b>Баланс пополнен (Paynet)!</b>\n\n` +
+    `• Заявка: <code>#${escapeHtml(t.id)}</code>\n` +
+    `• Внесено в терминал: <code>${formatUzs(t.cash_amount_uzs)}</code>\n` +
+    `• Зачислено (-${escapeHtml(String(t.fee_pct))}%): <code>+${formatUzs(res.creditedUzs)}</code>\n` +
+    `• Текущий баланс: <b>${formatUzs(res.newBalanceUzs)}</b>\n\n` +
+    `Теперь можете оплатить Stars, Premium или TON в 1 клик с баланса в Mini App.`;
+
+  try {
+    await bot.telegram.sendMessage(t.telegram_id, userMsg, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.warn('Не удалось уведомить клиента о пополнении баланса:', e.message);
   }
 
-  console.log(`🎯 [CardXabar] Совпадение! +${amount} UZS -> Заказ #${order.id} (${order.recipient_username})`);
-  const res = await fulfillOrder(order.id, {
-    confirmedBy: 'CardXabar Auto',
-    source: 'cardxabar',
-    cardXabarInfo: { amount, cardLast4, msgId }
-  });
-  return { matched: true, orderId: order.id, res };
+  if (!skipGroupNotice) {
+    const header = source === 'cardxabar'
+      ? `⚡ <b>АВТОПОПОЛНЕНИЕ PAYNET (#${escapeHtml(t.id)})</b>`
+      : `✅ <b>ПОПОЛНЕНИЕ PAYNET #${escapeHtml(t.id)} ЗАЧИСЛЕНО</b> (${escapeHtml(confirmedBy)})`;
+    const cardLine = cardXabarInfo
+      ? `💳 Приход: <code>+${formatUzs(cardXabarInfo.amount)}</code> (карта ***${escapeHtml(cardXabarInfo.cardLast4)})\n`
+      : '';
+    const groupMsg =
+      `${header}\n\n` +
+      cardLine +
+      `• <b>Клиент:</b> ${escapeHtml(t.buyer_username)} (ID: <code>${t.telegram_id}</code>)\n` +
+      `• <b>Внесено наличными:</b> <code>${formatUzs(t.cash_amount_uzs)}</code>\n` +
+      `• <b>Зачислено на баланс:</b> <code>+${formatUzs(res.creditedUzs)}</code>\n` +
+      `• <b>Новый баланс:</b> <b>${formatUzs(res.newBalanceUzs)}</b>`;
+
+    await sendToAdminAndGroup(groupMsg).catch(() => {});
+  }
+
+  return res;
+}
+
+async function handleCardXabarPayment({ amount, cardLast4, msgId, msgDateMs }) {
+  const order = dao.findOrderForCardXabarPayment(amount, msgDateMs, cardLast4);
+  if (order) {
+    console.log(`🎯 [CardXabar] Совпадение! +${amount} UZS -> Заказ #${order.id} (${order.recipient_username})`);
+    const res = await fulfillOrder(order.id, {
+      confirmedBy: 'CardXabar Auto',
+      source: 'cardxabar',
+      cardXabarInfo: { amount, cardLast4, msgId }
+    });
+    return { matched: true, orderId: order.id, res };
+  }
+
+  const topup = dao.findTopupForCardXabarPayment(amount, msgDateMs, cardLast4);
+  if (topup) {
+    console.log(`💵 [CardXabar] Совпадение Paynet! +${amount} UZS -> Пополнение #${topup.id} (${topup.buyer_username})`);
+    const res = await confirmAndCreditPaynetTopup(topup.id, {
+      creditedUzs: amount,
+      confirmedBy: 'CardXabar Auto',
+      source: 'cardxabar',
+      cardXabarInfo: { amount, cardLast4, msgId }
+    });
+    return { matched: true, orderId: topup.id, type: 'paynet_topup', res };
+  }
+
+  console.log(`ℹ️ [CardXabar] Пополнение +${amount} UZS (***${cardLast4}) — подходящих активных заказов или Paynet-заявок нет.`);
+  return { matched: false };
 }
 
 async function notifyAdminSessionBackup(sessionString, apiId, apiHash) {
@@ -685,7 +793,12 @@ app.get('/api/catalog', (req, res) => {
     tonPriceUzs: Number(settings.ton_price_uzs || 20000),
     minTon: Number(settings.min_ton || 0.2),
     maxTon: Number(settings.max_ton || 50),
-    autoConfirmEnabled: settings.auto_confirm_enabled === 'true'
+    autoConfirmEnabled: settings.auto_confirm_enabled === 'true',
+    paynetEnabled: settings.paynet_enabled !== 'false',
+    paynetFeePct: Number(settings.paynet_fee_pct ?? 3),
+    paynetTtlMinutes: Number(settings.paynet_ttl_minutes ?? 10),
+    paynetMinCashUzs: Number(settings.paynet_min_cash_uzs ?? 5000),
+    paynetTarget: (settings.paynet_target || settings.card_number || '5614681816265841').trim()
   });
 });
 
@@ -696,7 +809,7 @@ app.get('/api/ton/validate-address', auth, (req, res) => {
   res.json(parseAndValidateAddress(address, { ownWalletAddress }));
 });
 
-// Профиль пользователя, флаг isAdmin и активные заказы в работе
+// Профиль пользователя, баланс, флаг isAdmin и активные заказы в работе
 app.get('/api/user', auth, (req, res) => {
   const tgUser = req.telegramUser;
   dao.upsertUser({
@@ -707,10 +820,15 @@ app.get('/api/user', auth, (req, res) => {
   });
   const user = dao.getUser(tgUser.id);
   const activeOrders = dao.getUserActiveOrders(tgUser.id);
+  const activeTopups = dao.getUserActiveTopups(tgUser.id);
+  const recentTopups = dao.getUserTopups(tgUser.id, 10);
   res.json({
     user,
+    balanceUzs: Number(user?.balance_uzs || 0),
     isAdmin: isAdmin(tgUser.id),
-    activeOrders
+    activeOrders,
+    activeTopups,
+    recentTopups
   });
 });
 
@@ -735,6 +853,8 @@ app.get('/api/admin/info', auth, requireAdmin, async (req, res) => {
   const profitStats = dao.getProfitStats(settings);
   const broadcastStats = dao.getBroadcastStats();
   const pendingOrders = dao.getPendingOrders();
+  const pendingTopups = dao.getAdminTopups(25);
+  const usersWithBalance = dao.getUsersWithBalance(30);
   const fragmentConfig = FragmentService.getConfig();
   const cardXabarStatus = CardXabarService.getStatus();
   const tonRateInfo = getSavedTonRateSnapshot();
@@ -750,6 +870,8 @@ app.get('/api/admin/info', auth, requireAdmin, async (req, res) => {
     walletBalance,
     tonRateInfo,
     pendingOrders,
+    pendingTopups,
+    usersWithBalance,
     fragmentConfig,
     cardXabarStatus
   });
@@ -839,7 +961,13 @@ app.post('/api/admin/update-settings', auth, requireAdmin, async (req, res) => {
     tonMarkupMode,
     tonMarkupUzs,
     tonMarkupPct,
-    tonMinFloorUzs
+    tonMinFloorUzs,
+    paynetEnabled,
+    paynetFeePct,
+    paynetTtlMinutes,
+    paynetMinCashUzs,
+    paynetTarget,
+    paynetCards
   } = req.body;
 
   if (starPriceUzs) dao.setSetting('star_price_uzs', String(starPriceUzs));
@@ -866,6 +994,13 @@ app.post('/api/admin/update-settings', auth, requireAdmin, async (req, res) => {
   if (tonMarkupUzs !== undefined && tonMarkupUzs !== '') dao.setSetting('ton_markup_uzs', String(tonMarkupUzs));
   if (tonMarkupPct !== undefined && tonMarkupPct !== '') dao.setSetting('ton_markup_pct', String(tonMarkupPct));
   if (tonMinFloorUzs !== undefined && tonMinFloorUzs !== '') dao.setSetting('ton_min_floor_uzs', String(tonMinFloorUzs));
+
+  if (paynetEnabled !== undefined) dao.setSetting('paynet_enabled', String(paynetEnabled));
+  if (paynetFeePct !== undefined && paynetFeePct !== '') dao.setSetting('paynet_fee_pct', String(paynetFeePct));
+  if (paynetTtlMinutes !== undefined && paynetTtlMinutes !== '') dao.setSetting('paynet_ttl_minutes', String(paynetTtlMinutes));
+  if (paynetMinCashUzs !== undefined && paynetMinCashUzs !== '') dao.setSetting('paynet_min_cash_uzs', String(paynetMinCashUzs));
+  if (paynetTarget !== undefined) dao.setSetting('paynet_target', String(paynetTarget).trim());
+  if (paynetCards !== undefined) dao.setSetting('paynet_cards', String(paynetCards).trim());
 
   // Настройки Fragment
   if (fragmentEnabled !== undefined) dao.setSetting('fragment_enabled', String(fragmentEnabled));
@@ -1044,45 +1179,350 @@ app.post('/api/admin/order-action', auth, requireAdmin, async (req, res) => {
   res.status(400).json({ error: 'Неизвестное действие' });
 });
 
-// Шаг 1 оформления заказа: резервирование точной суммы («копеек») до перевода
-app.post('/api/orders/prepare', auth, (req, res) => {
-  try {
-    const { recipientUsername, type, amount, tonMemo } = req.body;
-    const tgUser = req.telegramUser;
+// Админ-панель: подтверждение / отклонение пополнения Paynet
+app.post('/api/admin/topup-action', auth, requireAdmin, async (req, res) => {
+  const { topupId, action, customAmount } = req.body || {};
+  const topup = dao.getPaynetTopup(topupId);
+  if (!topup) {
+    return res.status(404).json({ error: 'Заявка на пополнение не найдена' });
+  }
 
+  const adminName = req.telegramUser?.username ? '@' + req.telegramUser.username : 'Admin';
+  if (action === 'confirm') {
+    const amountToCredit = customAmount && Number(customAmount) > 0
+      ? Math.round(Number(customAmount))
+      : Number(topup.expected_card_uzs);
+    const result = await confirmAndCreditPaynetTopup(topupId, {
+      creditedUzs: amountToCredit,
+      confirmedBy: adminName,
+      source: 'manual'
+    });
+    if (!result.ok && result.reason === 'already_confirmed') {
+      return res.json({ success: true, alreadyConfirmed: true, topup: result.topup });
+    }
+    return res.json({ success: true, topup: result.topup, newBalanceUzs: result.newBalanceUzs });
+  }
+
+  if (action === 'reject') {
+    if (topup.status === 'confirmed') {
+      return res.status(400).json({ error: 'Заявка уже зачислена' });
+    }
+    dao.updatePaynetTopupStatus(topupId, 'rejected');
+    try {
+      await bot.telegram.sendMessage(
+        topup.telegram_id,
+        `❌ <b>Заявка Paynet #${escapeHtml(topup.id)} отклонена</b>\n\nЗачисление не обнаружено. Если вы уже внесли наличные, свяжитесь с администратором.`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (e) {}
+    return res.json({ success: true, status: 'rejected' });
+  }
+
+  res.status(400).json({ error: 'Неизвестное действие' });
+});
+
+// Админ-панель: ручная корректировка баланса пользователя
+app.post('/api/admin/user-balance', auth, requireAdmin, async (req, res) => {
+  const { identifier, deltaUzs, note } = req.body || {};
+  const user = dao.getUserByUsernameOrId(identifier);
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден в базе (он должен хотя бы раз открыть бот или Mini App)' });
+  }
+  const delta = Math.round(Number(deltaUzs));
+  if (!Number.isFinite(delta) || delta === 0) {
+    return res.status(400).json({ error: 'Укажите ненулевую сумму (например +10000 или -5000)' });
+  }
+
+  const adj = dao.adjustUserBalance(user.telegram_id, delta, 'admin_manual', String(note || ''));
+  const sign = adj.delta >= 0 ? '+' : '';
+  try {
+    await bot.telegram.sendMessage(
+      user.telegram_id,
+      `💼 <b>Изменение баланса в Nate Stars</b>\n\n• Операция: <code>${sign}${formatUzs(adj.delta)}</code>\n• Текущий баланс: <b>${formatUzs(adj.newBalance)}</b>` +
+      (note ? `\n• Комментарий: ${escapeHtml(String(note))}` : ''),
+      { parse_mode: 'HTML' }
+    );
+  } catch (e) {}
+
+  res.json({
+    success: true,
+    user: dao.getUser(user.telegram_id),
+    newBalanceUzs: adj.newBalance
+  });
+});
+
+// Пополнение баланса наличными через Paynet (таймер 10 минут сразу при выдаче карты)
+app.post('/api/topups/paynet/create', auth, (req, res) => {
+  try {
+    const tgUser = req.telegramUser;
     const settings = dao.getAllSettings();
-    let calc;
+    if (settings.paynet_enabled === 'false') {
+      return res.status(400).json({ error: 'Пополнение через Paynet временно отключено' });
+    }
+
+    const minCash = Math.max(1000, Number(settings.paynet_min_cash_uzs || 5000));
+    const feePct = Math.max(0, Math.min(20, Number(settings.paynet_fee_pct ?? 3)));
+    const ttlMin = Math.max(3, Math.min(30, Number(settings.paynet_ttl_minutes ?? 10)));
+    const cashAmount = Math.round(Number(req.body?.cashAmount || 0));
+
+    if (!Number.isFinite(cashAmount) || cashAmount < minCash) {
+      return res.status(400).json({ error: `Минимальная сумма внесения: ${formatUzs(minCash)}` });
+    }
+    if (cashAmount > 10000000) {
+      return res.status(400).json({ error: 'Максимальная сумма за один чек: 10 000 000 сум' });
+    }
+    if (cashAmount % 1000 !== 0) {
+      return res.status(400).json({ error: 'Сумма для банкомата должна быть кратна 1 000 сум' });
+    }
+
+    dao.upsertUser({
+      telegramId: tgUser.id,
+      username: tgUser.username,
+      firstName: tgUser.first_name,
+      lastName: tgUser.last_name
+    });
+
+    const reusable = dao.findReusableAwaitingPaynetTopup(tgUser.id, cashAmount);
+    if (reusable) {
+      const remainingSec = Math.max(0, Math.floor((Date.parse(reusable.expires_at) - Date.now()) / 1000));
+      return res.json({
+        success: true,
+        reused: true,
+        topup: { ...reusable, remainingSec }
+      });
+    }
+
+    const slot = dao.allocatePaynetTopupSlot({ cashAmount, feePct, settings, minCash });
+    if (!slot.ok) {
+      return res.status(409).json({
+        error: `Сумма ${formatUzs(cashAmount)} сейчас занята другим пополнением`,
+        code: 'SUM_BUSY',
+        retryAfterSec: slot.retryAfterSec,
+        suggestedAmounts: slot.suggestedAmounts
+      });
+    }
+
+    const topupId = 'PN-' + Math.floor(100000 + Math.random() * 900000);
+    const expiresAt = new Date(Date.now() + ttlMin * 60 * 1000).toISOString();
+
+    dao.createPaynetTopup({
+      id: topupId,
+      telegramId: tgUser.id,
+      buyerUsername: tgUser.username ? '@' + tgUser.username : tgUser.first_name,
+      cashAmountUzs: cashAmount,
+      feePct,
+      expectedCardUzs: slot.expectedCardUzs,
+      cardNumber: slot.cardNumber,
+      cardLast4: slot.cardLast4,
+      paynetTarget: slot.displayTarget,
+      expiresAt
+    });
+
+    const topup = dao.getPaynetTopup(topupId);
+    res.json({
+      success: true,
+      topup: {
+        ...topup,
+        remainingSec: ttlMin * 60
+      }
+    });
+  } catch (err) {
+    console.error('Ошибка создания Paynet-пополнения:', err);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+app.get('/api/topups/:id/status', auth, (req, res) => {
+  const topup = dao.getPaynetTopup(req.params.id);
+  if (!topup) {
+    return res.status(404).json({ error: 'Заявка не найдена' });
+  }
+  if (Number(topup.telegram_id) !== Number(req.telegramUser.id) && !isAdmin(req.telegramUser.id)) {
+    return res.status(403).json({ error: 'Доступ запрещён' });
+  }
+  const remainingSec = topup.status === 'awaiting_payment'
+    ? Math.max(0, Math.floor((Date.parse(topup.expires_at) - Date.now()) / 1000))
+    : 0;
+  const user = dao.getUser(topup.telegram_id);
+  res.json({
+    id: topup.id,
+    status: topup.status,
+    cashAmountUzs: topup.cash_amount_uzs,
+    feePct: topup.fee_pct,
+    expectedCardUzs: topup.expected_card_uzs,
+    creditedUzs: topup.credited_uzs,
+    cardNumber: topup.card_number,
+    paynetTarget: topup.paynet_target || topup.card_number,
+    expiresAt: topup.expires_at,
+    remainingSec,
+    balanceUzs: Number(user?.balance_uzs || 0)
+  });
+});
+
+app.post('/api/topups/:id/cancel', auth, (req, res) => {
+  const topup = dao.getPaynetTopup(req.params.id);
+  if (!topup) return res.status(404).json({ error: 'Заявка не найдена' });
+  if (Number(topup.telegram_id) !== Number(req.telegramUser.id) && !isAdmin(req.telegramUser.id)) {
+    return res.status(403).json({ error: 'Доступ запрещён' });
+  }
+  if (topup.status === 'awaiting_payment') {
+    dao.updatePaynetTopupStatus(topup.id, 'cancelled');
+  }
+  res.json({ success: true, status: dao.getPaynetTopup(topup.id)?.status });
+});
+
+app.post('/api/topups/:id/paid', auth, async (req, res) => {
+  try {
+    const topup = dao.getPaynetTopup(req.params.id);
+    if (!topup) return res.status(404).json({ error: 'Заявка не найдена' });
+    if (Number(topup.telegram_id) !== Number(req.telegramUser.id) && !isAdmin(req.telegramUser.id)) {
+      return res.status(403).json({ error: 'Доступ запрещён' });
+    }
+    if (topup.status === 'confirmed') {
+      const user = dao.getUser(topup.telegram_id);
+      return res.json({ success: true, alreadyConfirmed: true, topup, balanceUzs: Number(user?.balance_uzs || 0) });
+    }
+
+    const wasNotPending = topup.status !== 'pending';
+    if (topup.status === 'awaiting_payment' || topup.status === 'expired') {
+      dao.updatePaynetTopupStatus(topup.id, 'pending');
+    }
+    const updated = dao.getPaynetTopup(topup.id);
+
+    if (wasNotPending) {
+      const recentCx = dao.getRecentCardXabarLogs(3)
+        .map(l => `• +${formatUzs(l.amount)} (***${l.card_last4 || '----'})`)
+        .join('\n');
+      const msg =
+        `💵 <b>ЗАЯВКА PAYNET #${escapeHtml(updated.id)}</b>\n\n` +
+        `• <b>Клиент:</b> ${escapeHtml(updated.buyer_username)} (ID: <code>${updated.telegram_id}</code>)\n` +
+        `• <b>Внесено купюрами:</b> <code>${formatUzs(updated.cash_amount_uzs)}</code>\n` +
+        `• <b>Ожидается на карту (-${updated.fee_pct}%):</b> <code>${formatUzs(updated.expected_card_uzs)}</code>\n` +
+        `• <b>Реквизиты:</b> <code>${escapeHtml(updated.paynet_target || updated.card_number)}</code>\n` +
+        (recentCx ? `\n<i>Последние чеки CardXabar:</i>\n${recentCx}` : '\n<i>Ожидает зачисления / проверки</i>');
+
+      await sendToAdminAndGroup(msg, {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: `✅ Зачислить ${formatUzs(updated.expected_card_uzs)}`, callback_data: `topup_confirm_${updated.id}` },
+            { text: '❌ Отклонить', callback_data: `topup_reject_${updated.id}` }
+          ]]
+        }
+      });
+    }
+
+    res.json({ success: true, topup: updated });
+  } catch (err) {
+    console.error('Ошибка проверки Paynet:', err);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// Мгновенная оплата заказа с внутреннего баланса пользователя
+app.post('/api/orders/pay-with-balance', auth, async (req, res) => {
+  try {
+    const { recipientUsername, type, amount, tonMemo } = req.body || {};
+    const tgUser = req.telegramUser;
+    const settings = dao.getAllSettings();
+
+    let calc, rec;
     try {
       calc = calculateBasePrice(type, amount, settings);
+      rec = validateAndFormatRecipient(type, recipientUsername, tonMemo);
     } catch (e) {
       return res.status(400).json({ error: e.message });
     }
 
-    let fullRecipient = '';
-    let cleanMemo = '';
-    if (type === 'ton') {
-      const addrCheck = parseAndValidateAddress(recipientUsername, {
-        ownWalletAddress: FragmentService.getConfig().walletAddress
-      });
-      if (!addrCheck.valid) {
-        return res.status(400).json({ error: addrCheck.reason });
-      }
-      fullRecipient = addrCheck.rawInput;
-      cleanMemo = String(tonMemo || '').trim().slice(0, 120);
-    } else {
-      if (!recipientUsername) {
-        return res.status(400).json({ error: 'Укажите @username получателя' });
-      }
-      const cleanUsername = recipientUsername.replace(/^@/, '').trim();
-      if (!cleanUsername) {
-        return res.status(400).json({ error: 'Некорректный username' });
-      }
-      fullRecipient = '@' + cleanUsername;
+    dao.upsertUser({
+      telegramId: tgUser.id,
+      username: tgUser.username,
+      firstName: tgUser.first_name,
+      lastName: tgUser.last_name
+    });
+
+    const { basePriceUzs, normalizedAmount, itemDescription } = calc;
+    const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
+    const deb = dao.debitUserBalanceIfEnough(tgUser.id, basePriceUzs, 'order_payment', orderId);
+    if (!deb.ok) {
+      return res.status(400).json({ error: `Недостаточно средств на балансе (${formatUzs(deb.balance)} из ${formatUzs(basePriceUzs)})` });
+    }
+
+    const costUzs = calculateCostUzs(type, normalizedAmount, settings);
+    const cardNumber = settings.card_number || '5614681816265841';
+
+    dao.createOrder({
+      id: orderId,
+      telegramId: tgUser.id,
+      buyerUsername: tgUser.username ? '@' + tgUser.username : tgUser.first_name,
+      recipientUsername: rec.fullRecipient,
+      type,
+      amount: normalizedAmount,
+      priceUzs: basePriceUzs,
+      basePriceUzs,
+      cardPayUzs: 0,
+      balanceUsedUzs: basePriceUzs,
+      costUzs,
+      cardNumber,
+      status: 'paid_processing',
+      senderComment: 'Оплачено с баланса в боте',
+      paymentSource: 'balance',
+      tonMemo: rec.cleanMemo
+    });
+
+    const fulfilled = await fulfillOrder(orderId, {
+      confirmedBy: 'Balance',
+      source: 'balance',
+      balanceAlreadyDebited: true
+    });
+
+    const freshOrder = dao.getOrder(orderId);
+    res.json({
+      success: true,
+      newBalanceUzs: deb.newBalance,
+      order: {
+        ...freshOrder,
+        itemDescription,
+        priceUzs: basePriceUzs,
+        recipientUsername: rec.fullRecipient
+      },
+      deliveryState: fulfilled.order?.status || 'paid_processing'
+    });
+  } catch (err) {
+    console.error('Ошибка оплаты с баланса:', err);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// Шаг 1 оформления заказа: резервирование точной суммы («копеек») до перевода
+app.post('/api/orders/prepare', auth, (req, res) => {
+  try {
+    const { recipientUsername, type, amount, tonMemo, useBalance } = req.body;
+    const tgUser = req.telegramUser;
+
+    const settings = dao.getAllSettings();
+    let calc, rec;
+    try {
+      calc = calculateBasePrice(type, amount, settings);
+      rec = validateAndFormatRecipient(type, recipientUsername, tonMemo);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
     }
 
     const { basePriceUzs, normalizedAmount, itemDescription } = calc;
+    const { fullRecipient, cleanMemo } = rec;
     const autoConfirm = settings.auto_confirm_enabled === 'true';
     const cardNumber = settings.card_number || '5614681816265841';
+
+    let balanceUsed = 0;
+    if (useBalance) {
+      const u = dao.getUser(tgUser.id);
+      const avail = Number(u?.balance_uzs || 0);
+      if (avail > 0 && avail < basePriceUzs) {
+        balanceUsed = Math.min(avail, Math.max(0, basePriceUzs - 1000));
+      }
+    }
+
+    const cardDueBase = basePriceUzs - balanceUsed;
 
     const existing = dao.findReusableAwaitingOrder({
       telegramId: tgUser.id,
@@ -1090,18 +1530,22 @@ app.post('/api/orders/prepare', auth, (req, res) => {
       amount: normalizedAmount,
       recipientUsername: fullRecipient,
       basePriceUzs,
+      balanceUsedUzs: balanceUsed,
       tonMemo: cleanMemo
     });
 
     if (existing) {
+      const cardPay = Number(existing.card_pay_uzs || 0) > 0 ? Number(existing.card_pay_uzs) : Number(existing.price_uzs);
       return res.json({
         success: true,
         autoConfirm,
         order: {
           id: existing.id,
-          priceUzs: existing.price_uzs,
-          basePriceUzs: existing.base_price_uzs || existing.price_uzs,
-          deltaUzs: existing.price_uzs - (existing.base_price_uzs || existing.price_uzs),
+          priceUzs: cardPay,
+          totalPriceUzs: existing.price_uzs,
+          balanceUsedUzs: Number(existing.balance_used_uzs || 0),
+          basePriceUzs: cardDueBase,
+          deltaUzs: cardPay - cardDueBase,
           itemDescription,
           cardNumber: existing.card_number,
           recipientUsername: existing.recipient_username,
@@ -1111,7 +1555,8 @@ app.post('/api/orders/prepare', auth, (req, res) => {
       });
     }
 
-    const finalPriceUzs = autoConfirm ? dao.allocateUniquePrice(basePriceUzs) : basePriceUzs;
+    const cardPayUzs = autoConfirm ? dao.allocateUniquePrice(cardDueBase) : cardDueBase;
+    const totalPriceUzs = balanceUsed + cardPayUzs;
     const costUzs = calculateCostUzs(type, normalizedAmount, settings);
     const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
 
@@ -1122,8 +1567,10 @@ app.post('/api/orders/prepare', auth, (req, res) => {
       recipientUsername: fullRecipient,
       type,
       amount: normalizedAmount,
-      priceUzs: finalPriceUzs,
+      priceUzs: totalPriceUzs,
       basePriceUzs,
+      cardPayUzs,
+      balanceUsedUzs: balanceUsed,
       costUzs,
       cardNumber,
       status: 'awaiting_payment',
@@ -1136,9 +1583,11 @@ app.post('/api/orders/prepare', auth, (req, res) => {
       autoConfirm,
       order: {
         id: orderId,
-        priceUzs: finalPriceUzs,
-        basePriceUzs,
-        deltaUzs: finalPriceUzs - basePriceUzs,
+        priceUzs: cardPayUzs,
+        totalPriceUzs,
+        balanceUsedUzs: balanceUsed,
+        basePriceUzs: cardDueBase,
+        deltaUzs: cardPayUzs - cardDueBase,
         itemDescription,
         cardNumber,
         recipientUsername: fullRecipient,
@@ -1194,10 +1643,13 @@ app.get('/api/orders/:id/status', auth, (req, res) => {
   if (Number(order.telegram_id) !== Number(req.telegramUser.id) && !isAdmin(req.telegramUser.id)) {
     return res.status(403).json({ error: 'Доступ запрещён' });
   }
+  const effectiveCardPay = Number(order.card_pay_uzs || 0) > 0 ? Number(order.card_pay_uzs) : Number(order.price_uzs);
   res.json({
     id: order.id,
     status: order.status,
-    priceUzs: order.price_uzs,
+    priceUzs: effectiveCardPay,
+    totalPriceUzs: order.price_uzs,
+    balanceUsedUzs: Number(order.balance_used_uzs || 0),
     paymentSource: order.payment_source || 'manual'
   });
 });
@@ -1913,6 +2365,73 @@ bot.action(/real_reject_(.+)/, async (ctx) => {
 // Заглушка для нажатия на выполненный заказ
 bot.action(/done_(.+)/, async (ctx) => {
   await ctx.answerCbQuery('Этот заказ уже закрыт.');
+});
+
+// Подтверждение / отклонение пополнения баланса Paynet из Telegram
+bot.action(/topup_confirm_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+
+  const topupId = ctx.match[1];
+  const topup = dao.getPaynetTopup(topupId);
+  if (!topup) return ctx.answerCbQuery('Заявка не найдена');
+  if (topup.status === 'confirmed') {
+    await ctx.answerCbQuery('Уже зачислено');
+    return;
+  }
+
+  const adminName = ctx.from.username ? '@' + ctx.from.username : ctx.from.first_name;
+  const res = await confirmAndCreditPaynetTopup(topupId, {
+    creditedUzs: topup.expected_card_uzs,
+    confirmedBy: adminName,
+    source: 'manual',
+    skipGroupNotice: true
+  });
+
+  await ctx.answerCbQuery('Баланс пополнен!');
+  try {
+    const originalText = ctx.callbackQuery.message.text || '';
+    await ctx.editMessageText(
+      originalText + `\n\n✅ <b>ЗАЧИСЛЕНО +${formatUzs(res.creditedUzs)}</b> (${escapeHtml(adminName)})`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '✅ Зачислено', callback_data: `done_${topupId}` }]] }
+      }
+    );
+  } catch (e) {}
+});
+
+bot.action(/topup_reject_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+
+  const topupId = ctx.match[1];
+  const topup = dao.getPaynetTopup(topupId);
+  if (!topup) return ctx.answerCbQuery('Заявка не найдена');
+  if (topup.status === 'confirmed') return ctx.answerCbQuery('Уже зачислено, отменить нельзя');
+
+  dao.updatePaynetTopupStatus(topupId, 'rejected');
+  await ctx.answerCbQuery('Отклонено');
+
+  const adminName = ctx.from.username ? '@' + ctx.from.username : ctx.from.first_name;
+  try {
+    const originalText = ctx.callbackQuery.message.text || '';
+    await ctx.editMessageText(
+      originalText + `\n\n❌ <b>ОТКЛОНЕНО</b> (${escapeHtml(adminName)})`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '❌ Отклонено', callback_data: `done_${topupId}` }]] }
+      }
+    );
+  } catch (e) {}
+
+  try {
+    await bot.telegram.sendMessage(
+      topup.telegram_id,
+      `❌ <b>Заявка Paynet #${escapeHtml(topup.id)} отклонена</b>\n\nЗачисление не обнаружено. Если вы уже внесли наличные, свяжитесь с поддержкой.`,
+      { parse_mode: 'HTML' }
+    );
+  } catch (e) {}
 });
 
 // Обратная совместимость для старых кнопок

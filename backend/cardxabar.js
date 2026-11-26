@@ -77,19 +77,23 @@ function parseCardXabarMessage(rawText, targetCardLast4 = '') {
     if (fallbackCard) cardLast4 = fallbackCard[1];
   }
 
-  const expectedLast4 = String(targetCardLast4 || '').replace(/\D/g, '').slice(-4);
-  if (expectedLast4) {
-    if (cardLast4 && cardLast4 !== expectedLast4) {
+  const rawTargets = Array.isArray(targetCardLast4) ? targetCardLast4 : [targetCardLast4];
+  const expectedLast4List = rawTargets
+    .map(v => String(v || '').replace(/\D/g, '').slice(-4))
+    .filter(v => v.length === 4);
+
+  if (expectedLast4List.length > 0) {
+    if (cardLast4 && !expectedLast4List.includes(cardLast4)) {
       return null;
     }
-    if (!cardLast4 && !text.includes(expectedLast4)) {
+    if (!cardLast4 && !expectedLast4List.some(l4 => text.includes(l4))) {
       return null;
     }
   }
 
   return {
     amount,
-    cardLast4: cardLast4 || expectedLast4,
+    cardLast4: cardLast4 || expectedLast4List[0] || '',
     rawText: text
   };
 }
@@ -247,8 +251,11 @@ class CardXabarServiceImpl {
     const autoEnabled = dao.getSetting('auto_confirm_enabled') === 'true';
     if (!autoEnabled) return;
 
-    const cardNumber = dao.getSetting('card_number') || '';
-    const parsed = parseCardXabarMessage(msg.message, cardNumber);
+    const settings = dao.getAllSettings();
+    const cardTargets = typeof dao.getPaynetCardPool === 'function'
+      ? dao.getPaynetCardPool(settings)
+      : [settings.card_number || ''];
+    const parsed = parseCardXabarMessage(msg.message, cardTargets);
     if (!parsed) return;
 
     const msgDateMs = msg.date ? msg.date * 1000 : Date.now();

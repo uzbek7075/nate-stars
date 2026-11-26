@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="src/styles/main.css?v=21">
+  <link rel="stylesheet" href="src/styles/main.css?v=22">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     if (window.Telegram && window.Telegram.WebApp) {
@@ -51,14 +51,22 @@
           </div>
         </div>
 
-        <div class="profile-chip" id="profileChip">
-          <div class="profile-avatar" id="userAvatar">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
-              <circle cx="12" cy="7" r="4"></circle>
-            </svg>
+        <div class="header-right">
+          <button type="button" class="balance-chip" id="headerBalanceChip" onclick="openPaynetModal()">
+            <span class="balance-chip-icon">💵</span>
+            <span id="headerBalanceText">0 сум</span>
+            <span class="balance-chip-plus">+</span>
+          </button>
+
+          <div class="profile-chip" id="profileChip">
+            <div class="profile-avatar" id="userAvatar">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+              </svg>
+            </div>
+            <span class="profile-name" id="userName">Клиент</span>
           </div>
-          <span class="profile-name" id="userName">Клиент</span>
         </div>
       </div>
     </header>
@@ -777,6 +785,79 @@
           <div id="cxRecentLogs" class="cx-logs-box" style="margin-top:10px;"></div>
         </div>
 
+        <!-- Paynet & User Balances Card -->
+        <div class="glass-card admin-settings-card" style="margin-top: 14px;" id="paynetAdminCard">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+            <h3 class="card-title" style="margin:0;">💵 Баланс и банкоматы Paynet</h3>
+            <span id="paynetAdminStatusBadge" class="status-badge-clean confirmed">Вкл</span>
+          </div>
+          <p class="field-help" style="margin-bottom: 12px;">Пополнение внутреннего баланса наличными через Paynet (таймер брони запускается сразу при выдаче карты)</p>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingPaynetEnabled">Оплата Paynet</label>
+              <select id="settingPaynetEnabled" class="form-control">
+                <option value="true">Включено</option>
+                <option value="false">Отключено</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingPaynetFeePct">Комиссия Paynet (%)</label>
+              <input type="number" step="0.1" id="settingPaynetFeePct" class="form-control" placeholder="3">
+            </div>
+          </div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingPaynetTtlMinutes">Таймер оплаты (мин)</label>
+              <input type="number" id="settingPaynetTtlMinutes" class="form-control" placeholder="10">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingPaynetMinCashUzs">Мин. наличными (сум)</label>
+              <input type="number" step="1000" id="settingPaynetMinCashUzs" class="form-control" placeholder="5000">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingPaynetTarget">Реквизиты для показа в Paynet (необязательно)</label>
+            <input type="text" id="settingPaynetTarget" class="form-control" placeholder="Номер телефона или карты (пусто = основная карта)">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingPaynetCards">Запасные карты (опционально, через запятую)</label>
+            <input type="text" id="settingPaynetCards" class="form-control" placeholder="8600..., 9860... — если 2+ карты в @CardXabarBot">
+          </div>
+
+          <button type="button" class="cta-secondary-btn" onclick="saveAdminSettings()">
+            <span>Сохранить настройки Paynet</span>
+          </button>
+
+          <div class="admin-divider-title" style="margin-top:16px;">Ручное начисление / списание баланса</div>
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="adminBalIdentifier">@username или TG ID</label>
+              <input type="text" id="adminBalIdentifier" class="form-control" placeholder="@username или 5379...">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="adminBalDelta">Сумма (+ или -)</label>
+              <input type="number" id="adminBalDelta" class="form-control" placeholder="50000">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="adminBalNote">Комментарий клиенту (необязательно)</label>
+            <input type="text" id="adminBalNote" class="form-control" placeholder="Зачислено по чеку Paynet">
+          </div>
+          <button type="button" class="cta-secondary-btn" id="adminAdjustBalBtn" onclick="submitAdminUserBalance()">
+            <span>Обновить баланс пользователя</span>
+          </button>
+
+          <div class="admin-divider-title" style="margin-top:16px;">Последние заявки Paynet</div>
+          <div id="adminTopupsList" class="admin-orders-list"></div>
+
+          <div class="admin-divider-title" style="margin-top:16px;">Балансы пользователей</div>
+          <div id="adminUsersBalanceList" class="cx-logs-box"></div>
+        </div>
+
         <!-- Fragment Integration Form -->
         <div class="glass-card admin-settings-card" style="margin-top: 14px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -859,6 +940,27 @@
             </div>
           </div>
 
+          <!-- Balance Payment Box -->
+          <div id="balanceCheckoutBox" style="display:none;">
+            <div id="balanceCheckoutFull" class="balance-checkout-card" style="display:none;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:0.78rem;">
+                <span style="color:#d1fae5; font-weight:600;">Ваш баланс в боте</span>
+                <strong id="balanceCheckoutAvailFull" style="color:var(--ok);">0 сум</strong>
+              </div>
+              <button type="button" class="pay-with-balance-btn" id="payWithBalanceBtn" onclick="submitBalanceOrderPayment()">
+                <span>⚡ Оплатить с баланса (моментально)</span>
+              </button>
+              <div class="checkout-or-divider">или оплатите картой</div>
+            </div>
+
+            <div id="balanceCheckoutPartial" class="balance-checkout-card" style="display:none;">
+              <label class="checkbox-row" style="margin:0;">
+                <input type="checkbox" id="usePartialBalanceCheck" onchange="togglePartialBalance()">
+                <span id="balancePartialLabel">Списать с баланса 0 сум и доплатить остаток картой</span>
+              </label>
+            </div>
+          </div>
+
           <!-- Exact Amount Auto-Confirm Alert -->
           <div id="autoPayNotice" class="auto-pay-banner" style="display:none;">
             <div class="auto-pay-title">⚡ Мгновенное автоподтверждение</div>
@@ -925,6 +1027,10 @@
               <polyline points="20 6 9 17 4 12"></polyline>
             </svg>
           </button>
+
+          <button type="button" class="checkout-paynet-link-btn" id="checkoutPaynetAltBtn" onclick="switchCheckoutToPaynet()" style="display:none;">
+            💵 Нет карты? Пополнить баланс наличными через Paynet
+          </button>
         </div>
       </div>
     </div>
@@ -964,13 +1070,163 @@
       </div>
     </div>
 
+    <!-- Bottom Sheet Modal: Paynet Cash Top-up (Balance) -->
+    <div class="sheet-backdrop" id="paynetModal">
+      <div class="sheet-surface">
+        <div class="sheet-drag-handle"></div>
+
+        <div class="sheet-header">
+          <h3 class="sheet-title">Пополнение · Paynet (наличные)</h3>
+          <button class="sheet-close-btn" onclick="closePaynetModal()" aria-label="Закрыть">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div class="sheet-body">
+          <div class="paynet-only-banner">
+            <b>Только для наличных через банкомат Paynet.</b><br>
+            Если платите банковской картой Uzcard/Humo — баланс пополнять не нужно, покупайте товары сразу без комиссии.
+          </div>
+
+          <div class="paynet-cur-bal-row">
+            <span>Текущий баланс в боте</span>
+            <span class="paynet-cur-bal-val" id="paynetModalCurBalance">0 сум</span>
+          </div>
+
+          <!-- View 1: Create Cash Topup -->
+          <div id="paynetCreateView">
+            <div class="form-group">
+              <label class="form-label" for="paynetCashInput">Сколько внесёте купюрами в терминал (шаг 1 000 сум)</label>
+              <input
+                type="number"
+                id="paynetCashInput"
+                class="form-control"
+                style="font-family:var(--font-display); font-size:1.05rem; font-weight:700;"
+                inputmode="numeric"
+                value="20000"
+                min="5000"
+                step="1000"
+                oninput="updatePaynetPreview()"
+              >
+            </div>
+
+            <div class="presets-row" style="margin-bottom:12px;">
+              <button type="button" class="ton-preset-pill paynet-preset-pill" onclick="setPaynetCash(12000)">12 000</button>
+              <button type="button" class="ton-preset-pill paynet-preset-pill" onclick="setPaynetCash(15000)">15 000</button>
+              <button type="button" class="ton-preset-pill paynet-preset-pill active" onclick="setPaynetCash(20000)">20 000</button>
+              <button type="button" class="ton-preset-pill paynet-preset-pill" onclick="setPaynetCash(50000)">50 000</button>
+              <button type="button" class="ton-preset-pill paynet-preset-pill" onclick="setPaynetCash(100000)">100 000</button>
+            </div>
+
+            <div class="order-spec-card" style="margin-bottom:12px;">
+              <div class="spec-row">
+                <span class="spec-label">Внесёте наличными</span>
+                <span class="spec-val" id="paynetPrevCash">20 000 сум</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-label">Комиссия Paynet (<span id="paynetPrevFeePctLabel">3</span>%)</span>
+                <span class="spec-val" id="paynetPrevFee">-600 сум</span>
+              </div>
+              <div class="spec-row divider">
+                <span class="spec-label">Дойдёт на ваш баланс</span>
+                <span class="spec-total" style="color:var(--ok);" id="paynetPrevNet">19 400 сум</span>
+              </div>
+            </div>
+
+            <div id="paynetBusyAlert" class="paynet-busy-box" style="display:none;">
+              <div id="paynetBusyText">Эта сумма сейчас занята.</div>
+              <div id="paynetBusySuggestions" class="paynet-busy-pills"></div>
+            </div>
+
+            <button type="button" class="cta-primary-btn" id="paynetCreateBtn" onclick="submitCreatePaynetTopup()">
+              <span>Получить карту (таймер 10 мин)</span>
+            </button>
+          </div>
+
+          <!-- View 2: Active Topup with 10-Min Timer -->
+          <div id="paynetActiveView" style="display:none;">
+            <div class="paynet-timer-banner" id="paynetTimerBanner">
+              <span id="paynetTimerLabel">⏳ Реквизиты действуют</span>
+              <span class="paynet-timer-clock" id="paynetTimerCountdown">10:00</span>
+            </div>
+
+            <div class="order-spec-card">
+              <div class="spec-row">
+                <span class="spec-label">Внести в терминал ровно</span>
+                <div style="display:flex; align-items:center; gap:8px; cursor:pointer;" onclick="copyPaynetCash()">
+                  <span class="spec-total" id="paynetActiveCash">20 000 сум</span>
+                  <button type="button" class="copy-action-btn" style="padding:4px 8px; font-size:0.7rem;">Копировать</button>
+                </div>
+              </div>
+              <div class="spec-row divider">
+                <span class="spec-label">Поступит на баланс (-3%)</span>
+                <span class="spec-val" style="color:var(--ok);" id="paynetActiveExpected">19 400 сум</span>
+              </div>
+            </div>
+
+            <div class="requisites-card">
+              <div class="req-header">
+                <span class="req-type-label">Реквизиты для ввода в банкомате Paynet</span>
+              </div>
+              <div class="card-display" onclick="copyPaynetTarget()">
+                <span class="card-digits" id="paynetActiveTarget">5614 6818 1626 5841</span>
+                <button type="button" class="copy-action-btn">Копировать</button>
+              </div>
+              <div class="bank-annotation">Вносите ровно указанную сумму: по ней бот автоматически узнает ваш платёж (чек отправлять не нужно)</div>
+            </div>
+
+            <div class="auto-pay-banner" style="margin-bottom:12px;">
+              <div class="auto-pay-title">🔄 Автопроверка включена</div>
+              <div class="auto-pay-text">Как только зачисление дойдёт на карту, баланс сразу обновится!</div>
+            </div>
+
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <button type="button" class="submit-payment-btn" id="paynetMarkPaidBtn" onclick="markPaynetPaid()">
+                <span>Я уже внёс наличные</span>
+              </button>
+              <button type="button" class="cta-secondary-btn" id="paynetCancelBtn" onclick="cancelActivePaynetTopup()">
+                <span>Отменить заявку</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- View 3: Topup Credited Success -->
+          <div id="paynetSuccessView" style="display:none; text-align:center; padding:8px 0;">
+            <div class="success-check-badge" style="margin:0 auto 12px;">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+            </div>
+            <h3 class="success-title">Баланс пополнен!</h3>
+            <p class="success-description">Средства уже на вашем счёте. Можете оплачивать Stars, Premium или TON в 1 клик.</p>
+            <div class="success-spec-table">
+              <div class="s-row">
+                <span>Зачислено:</span>
+                <strong style="color:var(--ok);" id="paynetSuccessCredited">+19 400 сум</strong>
+              </div>
+              <div class="s-row">
+                <span>Ваш баланс:</span>
+                <strong class="text-accent" id="paynetSuccessTotalBal">19 400 сум</strong>
+              </div>
+            </div>
+            <button type="button" class="cta-primary-btn" style="margin-top:12px;" onclick="closePaynetModal()">
+              <span>Перейти к покупкам</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="footer-safe-spacer"></div>
   </div>
 
   <div class="toast-notification" id="toast"></div>
 
-  <script src="src/utils/api.js?v=21"></script>
-  <script src="src/utils/helpers.js?v=21"></script>
-  <script src="src/app.js?v=21"></script>
+  <script src="src/utils/api.js?v=22"></script>
+  <script src="src/utils/helpers.js?v=22"></script>
+  <script src="src/app.js?v=22"></script>
 </body>
 </html>

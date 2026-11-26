@@ -28,7 +28,10 @@ const API = (() => {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(data.error || `HTTP ${response.status}`);
+        const err = new Error(data.error || `HTTP ${response.status}`);
+        err.status = response.status;
+        err.data = data;
+        throw err;
       }
 
       return data;
@@ -193,6 +196,50 @@ const API = (() => {
       return request('/api/admin/broadcast/send', {
         method: 'POST',
         body: JSON.stringify({ text, includeOpenButton })
+      });
+    },
+
+    payOrderWithBalance(orderData) {
+      return request('/api/orders/pay-with-balance', {
+        method: 'POST',
+        body: JSON.stringify(orderData)
+      });
+    },
+
+    createPaynetTopup(cashAmount) {
+      return request('/api/topups/paynet/create', {
+        method: 'POST',
+        body: JSON.stringify({ cashAmount })
+      });
+    },
+
+    getTopupStatus(topupId) {
+      return request(`/api/topups/${encodeURIComponent(topupId)}/status`);
+    },
+
+    cancelPaynetTopup(topupId) {
+      return request(`/api/topups/${encodeURIComponent(topupId)}/cancel`, {
+        method: 'POST'
+      });
+    },
+
+    markPaynetTopupPaid(topupId) {
+      return request(`/api/topups/${encodeURIComponent(topupId)}/paid`, {
+        method: 'POST'
+      });
+    },
+
+    adminTopupAction(topupId, action, customAmount = null) {
+      return request('/api/admin/topup-action', {
+        method: 'POST',
+        body: JSON.stringify({ topupId, action, customAmount })
+      });
+    },
+
+    adminAdjustUserBalance(identifier, deltaUzs, note = '') {
+      return request('/api/admin/user-balance', {
+        method: 'POST',
+        body: JSON.stringify({ identifier, deltaUzs, note })
       });
     }
   };

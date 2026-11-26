@@ -2,7 +2,7 @@ const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, 'nate_stars.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'nate_stars.db');
 
 let db = null;
 
@@ -24,6 +24,7 @@ async function initDatabase() {
       username TEXT,
       first_name TEXT,
       last_name TEXT,
+      balance_uzs INTEGER DEFAULT 0,
       is_blocked INTEGER DEFAULT 0,
       last_seen_at TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now'))
@@ -41,6 +42,9 @@ async function initDatabase() {
     }
     if (!userCols.includes('last_seen_at')) {
       db.run("ALTER TABLE users ADD COLUMN last_seen_at TEXT DEFAULT ''");
+    }
+    if (!userCols.includes('balance_uzs')) {
+      db.run("ALTER TABLE users ADD COLUMN balance_uzs INTEGER DEFAULT 0");
     }
   } catch (e) {
     console.warn('Миграция users:', e.message);
@@ -83,6 +87,9 @@ async function initDatabase() {
       amount INTEGER NOT NULL,
       price_uzs INTEGER NOT NULL,
       base_price_uzs INTEGER DEFAULT 0,
+      card_pay_uzs INTEGER DEFAULT 0,
+      balance_used_uzs INTEGER DEFAULT 0,
+      balance_refunded INTEGER DEFAULT 0,
       card_number TEXT NOT NULL,
       status TEXT DEFAULT 'pending',
       sender_comment TEXT,
@@ -105,6 +112,15 @@ async function initDatabase() {
     if (!orderCols.includes('base_price_uzs')) {
       db.run("ALTER TABLE orders ADD COLUMN base_price_uzs INTEGER DEFAULT 0");
     }
+    if (!orderCols.includes('card_pay_uzs')) {
+      db.run("ALTER TABLE orders ADD COLUMN card_pay_uzs INTEGER DEFAULT 0");
+    }
+    if (!orderCols.includes('balance_used_uzs')) {
+      db.run("ALTER TABLE orders ADD COLUMN balance_used_uzs INTEGER DEFAULT 0");
+    }
+    if (!orderCols.includes('balance_refunded')) {
+      db.run("ALTER TABLE orders ADD COLUMN balance_refunded INTEGER DEFAULT 0");
+    }
     if (!orderCols.includes('payment_source')) {
       db.run("ALTER TABLE orders ADD COLUMN payment_source TEXT DEFAULT 'manual'");
     }
@@ -123,6 +139,39 @@ async function initDatabase() {
   } catch (e) {
     console.warn('Миграция orders:', e.message);
   }
+
+  // Таблица пополнений баланса наличными через Paynet
+  db.run(`
+    CREATE TABLE IF NOT EXISTS paynet_topups (
+      id TEXT PRIMARY KEY,
+      telegram_id INTEGER NOT NULL,
+      buyer_username TEXT,
+      cash_amount_uzs INTEGER NOT NULL,
+      fee_pct REAL NOT NULL,
+      expected_card_uzs INTEGER NOT NULL,
+      credited_uzs INTEGER DEFAULT 0,
+      card_number TEXT NOT NULL,
+      card_last4 TEXT DEFAULT '',
+      paynet_target TEXT DEFAULT '',
+      status TEXT DEFAULT 'awaiting_payment',
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Журнал операций с балансом пользователя
+  db.run(`
+    CREATE TABLE IF NOT EXISTS balance_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id INTEGER NOT NULL,
+      delta_uzs INTEGER NOT NULL,
+      balance_after_uzs INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      ref_id TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
 
   // Таблица обработанных уведомлений CardXabar (защита от двойного срабатывания)
   db.run(`
@@ -176,7 +225,13 @@ async function initDatabase() {
     'ton_min_floor_uzs': '0',
     'last_ton_usd': '',
     'last_cbu_usd_uzs': '',
-    'ton_rate_snapshot': '{}'
+    'ton_rate_snapshot': '{}',
+    'paynet_enabled': 'true',
+    'paynet_fee_pct': '3',
+    'paynet_ttl_minutes': '10',
+    'paynet_min_cash_uzs': '5000',
+    'paynet_target': '',
+    'paynet_cards': ''
   };
 
   for (const [key, val] of Object.entries(defaultSettings)) {
@@ -319,14 +374,98 @@ const dao = {
   },
 
   getUser(telegramId) {
-    return queryOne('SELECT * FROM users WHERE telegram_id = ?', [telegramId]);
+    return queryOne('SELECT * FROM users WHERE telegram_id = ?', [Number(telegramId)]);
   },
 
-  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, basePriceUzs, costUzs, cardNumber, status, senderComment, paymentSource, tonMemo = '', txHash = '' }) {
+  getUserByUsernameOrId(identifier) {
+    const raw = String(identifier || '').trim();
+    if (!raw) return null;
+    if (/^\d+$/.test(raw)) {
+      return this.getUser(Number(raw));
+    }
+    const clean = raw.replace(/^@+/, '').toLowerCase();
+    return queryOne('SELECT * FROM users WHERE LOWER(username) = ?', [clean]);
+  },
+
+  getUsersWithBalance(limit = 30) {
+    return queryAll('SELECT telegram_id, username, first_name, balance_uzs, last_seen_at FROM users WHERE COALESCE(balance_uzs, 0) > 0 ORDER BY balance_uzs DESC LIMIT ?', [limit]);
+  },
+
+  getPaynetCardPool(settings = null) {
+    const cfg = settings || this.getAllSettings();
+    const list = [];
+    const primary = String(cfg.card_number || '').replace(/\s+/g, '').trim();
+    if (primary) list.push(primary);
+    const extraRaw = String(cfg.paynet_cards || '');
+    for (const part of extraRaw.split(/[\n,;]+/)) {
+      const cleaned = part.replace(/\s+/g, '').trim();
+      if (cleaned && cleaned.replace(/\D/g, '').length >= 4 && !list.includes(cleaned)) {
+        list.push(cleaned);
+      }
+    }
+    return list;
+  },
+
+  adjustUserBalance(telegramId, deltaUzs, reason = 'manual', refId = '') {
+    const tgId = Number(telegramId);
+    const delta = Math.round(Number(deltaUzs || 0));
+    let user = this.getUser(tgId);
+    if (!user) {
+      this.upsertUser({ telegramId: tgId, username: '', firstName: 'Клиент', lastName: '' });
+      user = this.getUser(tgId);
+    }
+    const cur = Number(user?.balance_uzs || 0);
+    const next = Math.max(0, cur + delta);
+    const appliedDelta = next - cur;
     const nowIso = new Date().toISOString();
+
+    runSql('UPDATE users SET balance_uzs = ? WHERE telegram_id = ?', [next, tgId]);
     runSql(`
-      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, base_price_uzs, cost_uzs, card_number, status, sender_comment, payment_source, ton_memo, tx_hash, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO balance_logs (telegram_id, delta_uzs, balance_after_uzs, reason, ref_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [tgId, appliedDelta, next, String(reason || 'manual'), String(refId || ''), nowIso]);
+
+    return { prevBalance: cur, delta: appliedDelta, newBalance: next };
+  },
+
+  debitUserBalanceIfEnough(telegramId, amountUzs, reason = 'order_payment', refId = '') {
+    const tgId = Number(telegramId);
+    const need = Math.round(Number(amountUzs || 0));
+    if (need <= 0) return { ok: true, newBalance: Number(this.getUser(tgId)?.balance_uzs || 0) };
+
+    const user = this.getUser(tgId);
+    const cur = Number(user?.balance_uzs || 0);
+    if (cur < need) {
+      return { ok: false, balance: cur };
+    }
+    const next = cur - need;
+    const nowIso = new Date().toISOString();
+    runSql('UPDATE users SET balance_uzs = ? WHERE telegram_id = ?', [next, tgId]);
+    runSql(`
+      INSERT INTO balance_logs (telegram_id, delta_uzs, balance_after_uzs, reason, ref_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [tgId, -need, next, String(reason || 'order_payment'), String(refId || ''), nowIso]);
+    return { ok: true, prevBalance: cur, newBalance: next };
+  },
+
+  refundOrderBalanceOnce(orderId) {
+    const order = this.getOrder(orderId);
+    if (!order) return { refunded: false };
+    const used = Number(order.balance_used_uzs || 0);
+    if (used <= 0 || Number(order.balance_refunded || 0) === 1) {
+      return { refunded: false };
+    }
+    runSql('UPDATE orders SET balance_refunded = 1, updated_at = ? WHERE id = ?', [new Date().toISOString(), orderId]);
+    const adj = this.adjustUserBalance(order.telegram_id, used, 'order_refund', orderId);
+    return { refunded: true, amount: used, newBalance: adj.newBalance };
+  },
+
+  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, basePriceUzs, cardPayUzs = 0, balanceUsedUzs = 0, costUzs, cardNumber, status, senderComment, paymentSource, tonMemo = '', txHash = '' }) {
+    const nowIso = new Date().toISOString();
+    const effectiveCardPay = Number(cardPayUzs) >= 0 && balanceUsedUzs > 0 ? Number(cardPayUzs) : (Number(cardPayUzs) > 0 ? Number(cardPayUzs) : priceUzs);
+    runSql(`
+      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, base_price_uzs, card_pay_uzs, balance_used_uzs, balance_refunded, cost_uzs, card_number, status, sender_comment, payment_source, ton_memo, tx_hash, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       id,
       telegramId,
@@ -336,6 +475,8 @@ const dao = {
       amount,
       priceUzs,
       basePriceUzs || priceUzs,
+      effectiveCardPay,
+      Number(balanceUsedUzs || 0),
       Number(costUzs || 0),
       cardNumber,
       status || 'pending',
@@ -392,7 +533,7 @@ const dao = {
    * Повторно использует свежий неоплаченный заказ того же клиента (за последние 15 минут),
    * чтобы при закрытии/повторном открытии окна оплаты не тратились лишние «копейки».
    */
-  findReusableAwaitingOrder({ telegramId, type, amount, recipientUsername, basePriceUzs, tonMemo = '' }) {
+  findReusableAwaitingOrder({ telegramId, type, amount, recipientUsername, basePriceUzs, balanceUsedUzs = 0, tonMemo = '' }) {
     const cutoffIso = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const candidates = queryAll(`
       SELECT * FROM orders
@@ -404,27 +545,44 @@ const dao = {
     return candidates.find(o =>
       o.created_at >= cutoffIso &&
       Number(o.base_price_uzs || o.price_uzs) === Number(basePriceUzs) &&
+      Number(o.balance_used_uzs || 0) === Number(balanceUsedUzs || 0) &&
       String(o.ton_memo || '') === String(tonMemo || '')
     ) || null;
   },
 
+  expireStalePaynetTopups() {
+    const nowIso = new Date().toISOString();
+    const stale = queryOne("SELECT COUNT(*) as c FROM paynet_topups WHERE status = 'awaiting_payment' AND expires_at <= ?", [nowIso]);
+    if (stale && Number(stale.c) > 0) {
+      runSql("UPDATE paynet_topups SET status = 'expired', updated_at = ? WHERE status = 'awaiting_payment' AND expires_at <= ?", [nowIso, nowIso]);
+    }
+  },
+
   /**
-   * Подбирает уникальную сумму оплаты (базовая цена + 1..99 сум) среди всех активных заказов,
-   * чтобы однозначно определить покупателя по сообщению CardXabar.
+   * Подбирает уникальную сумму оплаты (базовая цена + 1..50 сум) среди всех активных заказов и Paynet-пополнений.
    */
   allocateUniquePrice(basePriceUzs) {
-    const cutoffIso = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    this.expireStalePaynetTopups();
+    const cutoffMs = Date.now() - 90 * 60 * 1000;
     const activeOrders = queryAll(`
-      SELECT price_uzs, created_at FROM orders
+      SELECT price_uzs, card_pay_uzs, created_at FROM orders
+      WHERE status IN ('awaiting_payment', 'pending')
+    `);
+    const activeTopups = queryAll(`
+      SELECT expected_card_uzs, created_at FROM paynet_topups
       WHERE status IN ('awaiting_payment', 'pending')
     `);
 
     const usedPrices = new Set();
     for (const o of activeOrders) {
       const ts = parseCreatedMs(o.created_at);
-      if (!isNaN(ts) && ts >= Date.parse(cutoffIso)) {
-        usedPrices.add(Number(o.price_uzs));
+      if (!isNaN(ts) && ts >= cutoffMs) {
+        const pay = Number(o.card_pay_uzs || 0) > 0 ? Number(o.card_pay_uzs) : Number(o.price_uzs);
+        usedPrices.add(pay);
       }
+    }
+    for (const t of activeTopups) {
+      usedPrices.add(Number(t.expected_card_uzs));
     }
 
     const candidatesPrimary = [];
@@ -446,7 +604,7 @@ const dao = {
   /**
    * Ищет активный заказ по точной сумме зачисления из CardXabar (созданный до поступления платежа).
    */
-  findOrderForCardXabarPayment(receivedAmount, msgDateMs) {
+  findOrderForCardXabarPayment(receivedAmount, msgDateMs, cardLast4 = '') {
     const cutoffMs = Date.now() - 120 * 60 * 1000;
     const candidates = queryAll(`
       SELECT * FROM orders
@@ -455,17 +613,226 @@ const dao = {
     `);
 
     const target = Number(receivedAmount);
+    const cleanIncomingLast4 = String(cardLast4 || '').replace(/\D/g, '').slice(-4);
     for (const o of candidates) {
       const createdMs = parseCreatedMs(o.created_at);
       if (isNaN(createdMs) || createdMs < cutoffMs) continue;
-      // Платёж должен поступить не раньше создания заказа (допуск 2 минуты на рассинхрон часов)
       if (msgDateMs && createdMs > msgDateMs + 120 * 1000) continue;
 
-      if (Math.abs(Number(o.price_uzs) - target) < 0.01) {
+      const orderLast4 = String(o.card_number || '').replace(/\D/g, '').slice(-4);
+      if (cleanIncomingLast4 && orderLast4 && cleanIncomingLast4 !== orderLast4) continue;
+
+      const expectedCardPay = Number(o.card_pay_uzs || 0) > 0 ? Number(o.card_pay_uzs) : Number(o.price_uzs);
+      if (Number(o.balance_used_uzs || 0) > 0 && Number(o.card_pay_uzs || 0) === 0) continue;
+
+      if (Math.abs(expectedCardPay - target) < 0.01) {
         return o;
       }
     }
     return null;
+  },
+
+  createPaynetTopup({ id, telegramId, buyerUsername, cashAmountUzs, feePct, expectedCardUzs, cardNumber, cardLast4, paynetTarget, expiresAt }) {
+    const nowIso = new Date().toISOString();
+    runSql(`
+      INSERT INTO paynet_topups (id, telegram_id, buyer_username, cash_amount_uzs, fee_pct, expected_card_uzs, credited_uzs, card_number, card_last4, paynet_target, status, expires_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'awaiting_payment', ?, ?, ?)
+    `, [
+      id,
+      Number(telegramId),
+      buyerUsername || '',
+      Math.round(cashAmountUzs),
+      Number(feePct),
+      Math.round(expectedCardUzs),
+      cardNumber,
+      cardLast4 || '',
+      paynetTarget || cardNumber,
+      expiresAt,
+      nowIso,
+      nowIso
+    ]);
+  },
+
+  getPaynetTopup(id) {
+    this.expireStalePaynetTopups();
+    return queryOne('SELECT * FROM paynet_topups WHERE id = ?', [id]);
+  },
+
+  getUserActiveTopups(telegramId) {
+    this.expireStalePaynetTopups();
+    return queryAll(`
+      SELECT * FROM paynet_topups
+      WHERE telegram_id = ? AND status IN ('awaiting_payment', 'pending')
+      ORDER BY created_at DESC LIMIT 5
+    `, [Number(telegramId)]);
+  },
+
+  getUserTopups(telegramId, limit = 15) {
+    this.expireStalePaynetTopups();
+    return queryAll(`
+      SELECT * FROM paynet_topups
+      WHERE telegram_id = ?
+      ORDER BY created_at DESC LIMIT ?
+    `, [Number(telegramId), limit]);
+  },
+
+  getAdminTopups(limit = 25) {
+    this.expireStalePaynetTopups();
+    return queryAll(`
+      SELECT * FROM paynet_topups
+      ORDER BY CASE WHEN status = 'pending' THEN 0 WHEN status = 'awaiting_payment' THEN 1 ELSE 2 END, created_at DESC
+      LIMIT ?
+    `, [limit]);
+  },
+
+  updatePaynetTopupStatus(id, status, extra = {}) {
+    const nowIso = new Date().toISOString();
+    if (extra.creditedUzs !== undefined) {
+      runSql('UPDATE paynet_topups SET status = ?, credited_uzs = ?, updated_at = ? WHERE id = ?', [status, Math.round(extra.creditedUzs), nowIso, id]);
+    } else {
+      runSql('UPDATE paynet_topups SET status = ?, updated_at = ? WHERE id = ?', [status, nowIso, id]);
+    }
+  },
+
+  findReusableAwaitingPaynetTopup(telegramId, cashAmountUzs) {
+    this.expireStalePaynetTopups();
+    const minValidUntilIso = new Date(Date.now() + 60 * 1000).toISOString();
+    return queryOne(`
+      SELECT * FROM paynet_topups
+      WHERE telegram_id = ? AND cash_amount_uzs = ? AND status = 'awaiting_payment' AND expires_at > ?
+      ORDER BY created_at DESC LIMIT 1
+    `, [Number(telegramId), Math.round(cashAmountUzs), minValidUntilIso]);
+  },
+
+  allocatePaynetTopupSlot({ cashAmount, feePct, settings, minCash = 5000 }) {
+    this.expireStalePaynetTopups();
+    const pool = this.getPaynetCardPool(settings);
+    const calcExpected = (c) => Math.round(c * (1 - Number(feePct) / 100));
+    const expectedCardUzs = calcExpected(cashAmount);
+
+    const pendingCutoffMs = Date.now() - 25 * 60 * 1000;
+    const orderCutoffMs = Date.now() - 90 * 60 * 1000;
+
+    const activeTopups = queryAll(`
+      SELECT card_last4, expected_card_uzs, status, expires_at, created_at FROM paynet_topups
+      WHERE status IN ('awaiting_payment', 'pending')
+    `);
+    const activeOrders = queryAll(`
+      SELECT card_number, price_uzs, card_pay_uzs, created_at FROM orders
+      WHERE status IN ('awaiting_payment', 'pending')
+    `);
+
+    const isBusyForCard = (cardLast4, expectedAmt) => {
+      for (const t of activeTopups) {
+        if (t.status === 'pending' && parseCreatedMs(t.created_at) < pendingCutoffMs) continue;
+        if (Number(t.expected_card_uzs) === expectedAmt && (!t.card_last4 || !cardLast4 || t.card_last4 === cardLast4)) {
+          return t;
+        }
+      }
+      for (const o of activeOrders) {
+        if (parseCreatedMs(o.created_at) < orderCutoffMs) continue;
+        const pay = Number(o.card_pay_uzs || 0) > 0 ? Number(o.card_pay_uzs) : Number(o.price_uzs);
+        const oL4 = String(o.card_number || '').replace(/\D/g, '').slice(-4);
+        if (pay === expectedAmt && (!oL4 || !cardLast4 || oL4 === cardLast4)) {
+          return { expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString() };
+        }
+      }
+      return null;
+    };
+
+    for (const card of pool) {
+      const l4 = card.replace(/\D/g, '').slice(-4);
+      if (!isBusyForCard(l4, expectedCardUzs)) {
+        const displayTarget = (pool.length === 1 && String(settings.paynet_target || '').trim())
+          ? String(settings.paynet_target).trim()
+          : card;
+        return {
+          ok: true,
+          cardNumber: card,
+          cardLast4: l4,
+          displayTarget,
+          expectedCardUzs
+        };
+      }
+    }
+
+    let minExpiresMs = Date.now() + 10 * 60 * 1000;
+    for (const card of pool) {
+      const l4 = card.replace(/\D/g, '').slice(-4);
+      const conflict = isBusyForCard(l4, expectedCardUzs);
+      if (conflict && conflict.expires_at) {
+        const ms = parseCreatedMs(conflict.expires_at);
+        if (!isNaN(ms) && ms < minExpiresMs) minExpiresMs = ms;
+      }
+    }
+
+    const retryAfterSec = Math.max(30, Math.ceil((minExpiresMs - Date.now()) / 1000));
+    const suggestedAmounts = [];
+    for (const delta of [1000, -1000, 2000, -2000, 3000, 5000]) {
+      if (suggestedAmounts.length >= 2) break;
+      const candCash = cashAmount + delta;
+      if (candCash < minCash) continue;
+      const candExpected = calcExpected(candCash);
+      const hasFreeCard = pool.some(c => !isBusyForCard(c.replace(/\D/g, '').slice(-4), candExpected));
+      if (hasFreeCard) {
+        suggestedAmounts.push({ cashAmount: candCash, expectedCardUzs: candExpected });
+      }
+    }
+
+    return {
+      ok: false,
+      code: 'SUM_BUSY',
+      expectedCardUzs,
+      retryAfterSec,
+      suggestedAmounts
+    };
+  },
+
+  findTopupForCardXabarPayment(receivedAmount, msgDateMs, cardLast4 = '') {
+    this.expireStalePaynetTopups();
+    const target = Number(receivedAmount);
+    const cleanIncomingLast4 = String(cardLast4 || '').replace(/\D/g, '').slice(-4);
+    const recentCutoffMs = Date.now() - 45 * 60 * 1000;
+    const graceCutoffMs = Date.now() - 3 * 60 * 1000;
+
+    const candidates = queryAll(`
+      SELECT * FROM paynet_topups
+      WHERE status IN ('pending', 'awaiting_payment', 'expired')
+      ORDER BY CASE WHEN status = 'pending' THEN 0 WHEN status = 'awaiting_payment' THEN 1 ELSE 2 END, created_at ASC
+    `);
+
+    for (const t of candidates) {
+      const createdMs = parseCreatedMs(t.created_at);
+      if (isNaN(createdMs) || createdMs < recentCutoffMs) continue;
+      if (msgDateMs && createdMs > msgDateMs + 120 * 1000) continue;
+
+      if (t.status === 'expired') {
+        const expMs = parseCreatedMs(t.expires_at);
+        if (isNaN(expMs) || expMs < graceCutoffMs) continue;
+      }
+
+      if (cleanIncomingLast4 && t.card_last4 && cleanIncomingLast4 !== t.card_last4) continue;
+      if (Math.abs(Number(t.expected_card_uzs) - target) < 0.01) {
+        return t;
+      }
+    }
+    return null;
+  },
+
+  confirmPaynetTopup(id, creditedUzs) {
+    const topup = this.getPaynetTopup(id);
+    if (!topup) return { ok: false, reason: 'not_found' };
+    if (topup.status === 'confirmed') return { ok: false, reason: 'already_confirmed', topup };
+
+    const amount = Math.round(Number(creditedUzs || topup.expected_card_uzs));
+    this.updatePaynetTopupStatus(id, 'confirmed', { creditedUzs: amount });
+    const adj = this.adjustUserBalance(topup.telegram_id, amount, 'paynet_topup', id);
+    return {
+      ok: true,
+      topup: this.getPaynetTopup(id),
+      creditedUzs: amount,
+      newBalanceUzs: adj.newBalance
+    };
   },
 
   isCardXabarMsgProcessed(msgId) {
