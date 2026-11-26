@@ -168,321 +168,61 @@ function applyCatalogToUI() {
   updateTonCalc();
 }
 
-// ===== Единый двусторонний калькулятор (Звёзды / TON <-> UZS) =====
-
-const AUTO_PAY_KOPECK_MAX = 50;
+// ===== Калькулятор TON =====
 
 function roundTon(val) {
   return Math.round(Number(val) * 100) / 100;
 }
 
-function getKopeckReserve() {
-  return catalog.autoConfirmEnabled ? AUTO_PAY_KOPECK_MAX : 0;
-}
-
-const CALC_CONFIG = {
-  stars: {
-    amountInputId: 'starsAmountInput',
-    budgetInputId: 'starsBudgetInput',
-    clearBtnId: 'starsBudgetClearBtn',
-    reverseBoxId: 'starsReverseBox',
-    hintId: 'starsReverseHint',
-    priceTextId: 'starsPriceText',
-    kopecksNoteId: 'starsKopecksNote',
-    presetSelector: '.preset-pill',
-    unitLabel: '★',
-    getAmount: () => starsAmount,
-    setAmount: (val) => { starsAmount = val; },
-    getMinAmount: () => Number(catalog.minStars || 50),
-    getMaxAmount: () => Infinity,
-    getRate: () => Number(catalog.starPriceUzs || 220),
-    roundAmount: (val) => Math.max(1, Math.floor(Number(val) || 0)),
-    parseAmountInput: (raw) => parseInt(raw, 10),
-    calcAmountFromBudget: (budget, rate) => Math.floor(budget / rate),
-    calcPrice: (amount, rate) => Math.round(amount * rate),
-  },
-  ton: {
-    amountInputId: 'tonAmountInput',
-    budgetInputId: 'tonBudgetInput',
-    clearBtnId: 'tonBudgetClearBtn',
-    reverseBoxId: 'tonReverseBox',
-    hintId: 'tonReverseHint',
-    priceTextId: 'tonPriceText',
-    kopecksNoteId: 'tonKopecksNote',
-    presetSelector: '.ton-preset-pill',
-    unitLabel: 'TON',
-    getAmount: () => tonAmount,
-    setAmount: (val) => { tonAmount = val; },
-    getMinAmount: () => Number(catalog.minTon || 0.2),
-    getMaxAmount: () => Number(catalog.maxTon || 50),
-    getRate: () => Number(catalog.tonPriceUzs || 20000),
-    roundAmount: (val) => roundTon(val),
-    parseAmountInput: (raw) => parseFloat(String(raw).replace(',', '.')),
-    calcAmountFromBudget: (budget, rate) => Math.floor((budget / rate) * 100 + 1e-9) / 100,
-    calcPrice: (amount, rate) => Math.round(amount * rate),
-  }
-};
-
-function syncCalcPills(type, activeAmount, activeBudget) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-
-  document.querySelectorAll(cfg.presetSelector).forEach(btn => {
-    const btnVal = parseFloat(btn.textContent.replace(/\s+/g, ''));
-    btn.classList.toggle('active', btnVal === activeAmount);
-  });
-
-  document.querySelectorAll(`.budget-pill[data-type="${type}"]`).forEach(btn => {
-    const btnUzs = Number(btn.dataset.uzs);
-    btn.classList.toggle('active', Number.isFinite(activeBudget) && btnUzs === activeBudget);
-  });
-}
-
-function formatBaseMinHint(minBase, reserve) {
-  return reserve > 0
-    ? `от ${Helpers.formatUzs(minBase)} (+1–${reserve})`
-    : `от ${Helpers.formatUzs(minBase)}`;
-}
-
-function updateCalcSummary(type, { syncBudgetInput = true, typedBudget = null, warnState = null } = {}) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-
-  const amount = cfg.getAmount();
-  const rate = cfg.getRate();
-  const minAmt = cfg.getMinAmount();
-  const maxAmt = cfg.getMaxAmount();
-  const minBase = cfg.calcPrice(minAmt, rate);
-  const reserve = getKopeckReserve();
-  const minWithReserve = minBase + reserve;
-  const actualPrice = cfg.calcPrice(amount, rate);
-
-  const priceEl = document.getElementById(cfg.priceTextId);
-  if (priceEl) {
-    priceEl.textContent = Helpers.formatUzs(actualPrice);
-  }
-
-  const kopecksEl = document.getElementById(cfg.kopecksNoteId);
-  if (kopecksEl) {
-    if (reserve > 0) {
-      const minFinal = actualPrice + 1;
-      const maxFinal = actualPrice + reserve;
-      const rangeText = `${minFinal.toLocaleString('ru-RU')}–${Helpers.formatUzs(maxFinal)}`;
-      kopecksEl.style.display = 'flex';
-      if (typedBudget !== null && Number.isFinite(typedBudget) && typedBudget > 0 && (warnState === 'min' || warnState === 'min_kopecks')) {
-        kopecksEl.style.color = 'var(--state-pending)';
-        kopecksEl.textContent = `+ 1–${reserve} сум для автооплаты → итого ${rangeText}`;
-      } else if (typedBudget !== null && Number.isFinite(typedBudget) && typedBudget > 0 && !warnState) {
-        kopecksEl.style.color = 'var(--blue-bright)';
-        kopecksEl.textContent = `+ 1–${reserve} сум для автооплаты → итого ${rangeText} (≤ ${Helpers.formatUzs(typedBudget)})`;
-      } else {
-        kopecksEl.style.color = 'var(--blue-bright)';
-        kopecksEl.textContent = `+ 1–${reserve} сум копеек для автооплаты → итого ${rangeText}`;
-      }
-    } else {
-      kopecksEl.style.display = 'none';
-      kopecksEl.textContent = '';
-    }
-  }
-
-  const budgetInput = document.getElementById(cfg.budgetInputId);
-  if (budgetInput) {
-    budgetInput.min = String(minBase);
-    if (syncBudgetInput && document.activeElement !== budgetInput) {
-      budgetInput.value = String(actualPrice);
-    }
-  }
-
-  const clearBtn = document.getElementById(cfg.clearBtnId);
-  if (clearBtn) {
-    clearBtn.classList.toggle('visible', Boolean(budgetInput && String(budgetInput.value).trim().length > 0));
-  }
-
-  const reverseBox = document.getElementById(cfg.reverseBoxId);
-  const hintEl = document.getElementById(cfg.hintId);
-  if (hintEl) {
-    if (warnState === 'min') {
-      hintEl.textContent = reserve > 0
-        ? `Мин.: ${Helpers.formatUzs(minWithReserve)} с копейками`
-        : `Мин.: ${Helpers.formatUzs(minBase)} (${minAmt} ${cfg.unitLabel})`;
-      hintEl.style.color = 'var(--state-pending)';
-      if (reverseBox) reverseBox.classList.add('is-warning');
-    } else if (warnState === 'min_kopecks') {
-      hintEl.textContent = `С копейками от ${Helpers.formatUzs(minWithReserve)}`;
-      hintEl.style.color = 'var(--state-pending)';
-      if (reverseBox) reverseBox.classList.add('is-warning');
-    } else if (warnState === 'max') {
-      hintEl.textContent = `Макс. заказ: ${maxAmt} ${cfg.unitLabel}`;
-      hintEl.style.color = 'var(--state-pending)';
-      if (reverseBox) reverseBox.classList.add('is-warning');
-    } else if (typedBudget !== null && Number.isFinite(typedBudget) && typedBudget > 0) {
-      if (reserve > 0) {
-        hintEl.textContent = `✓ Выйдет ${amount} ${cfg.unitLabel} (с запасом под копейки)`;
-      } else {
-        const remainder = Math.max(0, Math.round(typedBudget - actualPrice));
-        hintEl.textContent = remainder === 0
-          ? `✓ Ровно ${amount} ${cfg.unitLabel}`
-          : `Получите ${amount} ${cfg.unitLabel} · остаток ${Helpers.formatUzs(remainder)}`;
-      }
-      hintEl.style.color = 'var(--ok)';
-      if (reverseBox) reverseBox.classList.remove('is-warning');
-    } else {
-      hintEl.textContent = formatBaseMinHint(minBase, reserve);
-      hintEl.style.color = 'var(--text-soft)';
-      if (reverseBox) reverseBox.classList.remove('is-warning');
-    }
-  }
-
-  syncCalcPills(type, amount, typedBudget ?? actualPrice);
-}
-
-function setCalcAmount(type, amount) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-  Helpers.haptic('light');
-  const normalized = Math.max(cfg.getMinAmount(), cfg.roundAmount(amount));
-  cfg.setAmount(normalized);
-  const input = document.getElementById(cfg.amountInputId);
-  if (input) input.value = normalized;
-  updateCalcSummary(type, { syncBudgetInput: true });
-}
-
-function adjustCalcAmount(type, diff) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-  setCalcAmount(type, cfg.getAmount() + diff);
-}
-
-function onCalcAmountInput(type) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-  const input = document.getElementById(cfg.amountInputId);
-  if (!input) return;
-
-  const parsed = cfg.parseAmountInput(input.value);
-  const minAmt = cfg.getMinAmount();
-  const val = (isNaN(parsed) || parsed <= 0) ? minAmt : cfg.roundAmount(parsed);
-  cfg.setAmount(val);
-  updateCalcSummary(type, { syncBudgetInput: true });
-}
-
-function applyBudgetCalculation(type, rawBudget) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-
-  const budget = Math.floor(Number(rawBudget));
-  const rate = cfg.getRate();
-  const minAmt = cfg.getMinAmount();
-  const maxAmt = cfg.getMaxAmount();
-  const minBase = cfg.calcPrice(minAmt, rate);
-  const maxBase = Number.isFinite(maxAmt) ? cfg.calcPrice(maxAmt, rate) : Infinity;
-  const reserve = getKopeckReserve();
-  const minWithReserve = minBase + reserve;
-  const maxWithReserve = Number.isFinite(maxBase) ? (maxBase + reserve) : Infinity;
-
-  let nextAmount = minAmt;
-  let warnState = null;
-
-  if (budget < minBase) {
-    nextAmount = minAmt;
-    warnState = 'min';
-  } else if (reserve > 0 && budget < minWithReserve) {
-    nextAmount = minAmt;
-    warnState = 'min_kopecks';
-  } else if (budget > maxWithReserve) {
-    nextAmount = maxAmt;
-    warnState = 'max';
-  } else {
-    const spendable = Math.max(minBase, budget - reserve);
-    nextAmount = Math.max(minAmt, Math.min(maxAmt, cfg.calcAmountFromBudget(spendable, rate)));
-  }
-
-  cfg.setAmount(nextAmount);
-  const amountInput = document.getElementById(cfg.amountInputId);
-  if (amountInput) amountInput.value = nextAmount;
-
-  updateCalcSummary(type, {
-    syncBudgetInput: false,
-    typedBudget: budget,
-    warnState
-  });
-}
-
-function setBudget(type, uzs) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-  Helpers.haptic('light');
-  const budgetInput = document.getElementById(cfg.budgetInputId);
-  if (budgetInput) budgetInput.value = String(uzs);
-  applyBudgetCalculation(type, uzs);
-}
-
-function onBudgetInputChange(type) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-  const budgetInput = document.getElementById(cfg.budgetInputId);
-  if (!budgetInput) return;
-
-  const raw = String(budgetInput.value || '').trim().replace(/\s+/g, '');
-  if (!raw) {
-    const clearBtn = document.getElementById(cfg.clearBtnId);
-    if (clearBtn) clearBtn.classList.remove('visible');
-    const reverseBox = document.getElementById(cfg.reverseBoxId);
-    if (reverseBox) reverseBox.classList.remove('is-warning');
-    const hintEl = document.getElementById(cfg.hintId);
-    if (hintEl) {
-      const minBase = cfg.calcPrice(cfg.getMinAmount(), cfg.getRate());
-      hintEl.textContent = formatBaseMinHint(minBase, getKopeckReserve());
-      hintEl.style.color = 'var(--text-soft)';
-    }
-    syncCalcPills(type, cfg.getAmount(), NaN);
-    return;
-  }
-
-  const parsed = parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return;
-  applyBudgetCalculation(type, parsed);
-}
-
-function clearBudgetInput(type) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-  Helpers.haptic('light');
-  const budgetInput = document.getElementById(cfg.budgetInputId);
-  if (budgetInput) {
-    budgetInput.value = '';
-    budgetInput.focus();
-  }
-  onBudgetInputChange(type);
-}
-
-function onBudgetInputBlur(type) {
-  const cfg = CALC_CONFIG[type];
-  if (!cfg) return;
-  const budgetInput = document.getElementById(cfg.budgetInputId);
-  if (!budgetInput) return;
-
-  if (!String(budgetInput.value || '').trim()) {
-    updateCalcSummary(type, { syncBudgetInput: true });
-  }
-}
-
-// ===== Калькулятор TON =====
-
 function setTon(amount) {
-  setCalcAmount('ton', amount);
+  Helpers.haptic('light');
+  tonAmount = Math.max(catalog.minTon || 0.2, roundTon(amount));
+  const input = document.getElementById('tonAmountInput');
+  if (input) input.value = tonAmount;
+
+  document.querySelectorAll('.ton-preset-pill').forEach(btn => {
+    const btnVal = parseFloat(btn.textContent.replace(/\s+/g, ''));
+    btn.classList.toggle('active', btnVal === tonAmount);
+  });
+
+  updateTonCalc();
 }
 
 function adjustTon(diff) {
-  adjustCalcAmount('ton', diff);
+  Helpers.haptic('light');
+  tonAmount = Math.max(catalog.minTon || 0.2, roundTon(tonAmount + diff));
+  const input = document.getElementById('tonAmountInput');
+  if (input) input.value = tonAmount;
+
+  document.querySelectorAll('.ton-preset-pill').forEach(btn => {
+    const btnVal = parseFloat(btn.textContent.replace(/\s+/g, ''));
+    btn.classList.toggle('active', btnVal === tonAmount);
+  });
+
+  updateTonCalc();
 }
 
 function onTonInputChange() {
-  onCalcAmountInput('ton');
+  const input = document.getElementById('tonAmountInput');
+  if (!input) return;
+  let val = parseFloat(String(input.value).replace(',', '.'));
+  if (isNaN(val) || val <= 0) val = catalog.minTon || 0.2;
+  tonAmount = roundTon(val);
+
+  document.querySelectorAll('.ton-preset-pill').forEach(btn => {
+    const btnVal = parseFloat(btn.textContent.replace(/\s+/g, ''));
+    btn.classList.toggle('active', btnVal === tonAmount);
+  });
+
+  updateTonCalc();
 }
 
 function updateTonCalc() {
-  updateCalcSummary('ton', { syncBudgetInput: true });
+  const price = Math.round(tonAmount * Number(catalog.tonPriceUzs || 20000));
+  const priceEl = document.getElementById('tonPriceText');
+  if (priceEl) {
+    priceEl.textContent = Helpers.formatUzs(price);
+  }
 }
 
 function scheduleTonAddressCheck(rawVal) {
@@ -536,19 +276,55 @@ async function validateTonAddressRemote(rawVal) {
 // ===== Калькулятор звёзд =====
 
 function setStars(amount) {
-  setCalcAmount('stars', amount);
+  Helpers.haptic('light');
+  starsAmount = Math.max(catalog.minStars, amount);
+  const input = document.getElementById('starsAmountInput');
+  if (input) input.value = starsAmount;
+
+  document.querySelectorAll('.preset-pill').forEach(btn => {
+    const btnVal = parseInt(btn.textContent.replace(/\s+/g, ''), 10);
+    btn.classList.toggle('active', btnVal === amount);
+  });
+
+  updateStarsCalc();
 }
 
 function adjustStars(diff) {
-  adjustCalcAmount('stars', diff);
+  Helpers.haptic('light');
+  starsAmount = Math.max(catalog.minStars, starsAmount + diff);
+  const input = document.getElementById('starsAmountInput');
+  if (input) input.value = starsAmount;
+
+  document.querySelectorAll('.preset-pill').forEach(btn => {
+    const btnVal = parseInt(btn.textContent.replace(/\s+/g, ''), 10);
+    btn.classList.toggle('active', btnVal === starsAmount);
+  });
+
+  updateStarsCalc();
 }
 
 function onStarsInputChange() {
-  onCalcAmountInput('stars');
+  const input = document.getElementById('starsAmountInput');
+  if (!input) return;
+
+  let val = parseInt(input.value, 10);
+  if (isNaN(val) || val < 1) val = catalog.minStars;
+  starsAmount = val;
+
+  document.querySelectorAll('.preset-pill').forEach(btn => {
+    const btnVal = parseInt(btn.textContent.replace(/\s+/g, ''), 10);
+    btn.classList.toggle('active', btnVal === starsAmount);
+  });
+
+  updateStarsCalc();
 }
 
 function updateStarsCalc() {
-  updateCalcSummary('stars', { syncBudgetInput: true });
+  const price = starsAmount * catalog.starPriceUzs;
+  const priceEl = document.getElementById('starsPriceText');
+  if (priceEl) {
+    priceEl.textContent = Helpers.formatUzs(price);
+  }
 }
 
 function getRecipient() {

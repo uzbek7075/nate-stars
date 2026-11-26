@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="src/styles/main.css?v=20">
+  <link rel="stylesheet" href="src/styles/main.css?v=21">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     if (window.Telegram && window.Telegram.WebApp) {
@@ -165,7 +165,7 @@
                 class="amount-input" 
                 value="100" 
                 min="50" 
-                step="1" 
+                step="50" 
                 oninput="onStarsInputChange()"
               >
               <span class="currency-symbol">★</span>
@@ -190,50 +190,12 @@
             <button class="preset-pill" onclick="setStars(5000)">5 000</button>
           </div>
 
-          <!-- Reverse budget calculator -->
-          <div class="reverse-calc-box" id="starsReverseBox">
-            <div class="reverse-calc-head">
-              <span class="reverse-calc-title">На сумму (обратный расчёт)</span>
-              <span class="reverse-calc-hint" id="starsReverseHint">от 11 000 сум</span>
-            </div>
-            <div class="reverse-input-wrap">
-              <input
-                type="number"
-                id="starsBudgetInput"
-                class="reverse-budget-input"
-                inputmode="numeric"
-                min="1000"
-                step="1000"
-                placeholder="Сколько сум хотите потратить?"
-                oninput="onBudgetInputChange('stars')"
-                onblur="onBudgetInputBlur('stars')"
-              >
-              <button
-                type="button"
-                class="reverse-clear-btn"
-                id="starsBudgetClearBtn"
-                aria-label="Очистить сумму"
-                onmousedown="event.preventDefault()"
-                onclick="clearBudgetInput('stars')"
-              >✕</button>
-              <span class="reverse-currency">сум</span>
-            </div>
-            <div class="reverse-chips-row">
-              <button type="button" class="budget-pill" data-type="stars" data-uzs="15000" onclick="setBudget('stars', 15000)">15k</button>
-              <button type="button" class="budget-pill" data-type="stars" data-uzs="30000" onclick="setBudget('stars', 30000)">30k</button>
-              <button type="button" class="budget-pill" data-type="stars" data-uzs="50000" onclick="setBudget('stars', 50000)">50k</button>
-              <button type="button" class="budget-pill" data-type="stars" data-uzs="100000" onclick="setBudget('stars', 100000)">100k</button>
-              <button type="button" class="budget-pill" data-type="stars" data-uzs="250000" onclick="setBudget('stars', 250000)">250k</button>
-            </div>
-          </div>
-
           <!-- Total summary -->
           <div class="cost-summary">
             <div class="cost-line">
               <span class="cost-label">Итого к оплате</span>
               <span class="cost-value" id="starsPriceText">22 000 сум</span>
             </div>
-            <div class="cost-kopecks-note" id="starsKopecksNote" style="display:none;"></div>
             <div class="benefit-badge">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline>
@@ -364,7 +326,7 @@
                 class="amount-input"
                 value="1"
                 min="0.2"
-                step="0.01"
+                step="0.1"
                 oninput="onTonInputChange()"
               >
               <span class="currency-symbol" style="font-size:0.9rem;">TON</span>
@@ -388,43 +350,6 @@
             <button class="ton-preset-pill" onclick="setTon(25)">25</button>
           </div>
 
-          <!-- Reverse budget calculator (TON) -->
-          <div class="reverse-calc-box" id="tonReverseBox">
-            <div class="reverse-calc-head">
-              <span class="reverse-calc-title">На сумму (обратный расчёт)</span>
-              <span class="reverse-calc-hint" id="tonReverseHint">от 2 800 сум</span>
-            </div>
-            <div class="reverse-input-wrap">
-              <input
-                type="number"
-                id="tonBudgetInput"
-                class="reverse-budget-input"
-                inputmode="numeric"
-                min="1000"
-                step="1000"
-                placeholder="Сколько сум хотите потратить?"
-                oninput="onBudgetInputChange('ton')"
-                onblur="onBudgetInputBlur('ton')"
-              >
-              <button
-                type="button"
-                class="reverse-clear-btn"
-                id="tonBudgetClearBtn"
-                aria-label="Очистить сумму"
-                onmousedown="event.preventDefault()"
-                onclick="clearBudgetInput('ton')"
-              >✕</button>
-              <span class="reverse-currency">сум</span>
-            </div>
-            <div class="reverse-chips-row">
-              <button type="button" class="budget-pill" data-type="ton" data-uzs="10000" onclick="setBudget('ton', 10000)">10k</button>
-              <button type="button" class="budget-pill" data-type="ton" data-uzs="25000" onclick="setBudget('ton', 25000)">25k</button>
-              <button type="button" class="budget-pill" data-type="ton" data-uzs="50000" onclick="setBudget('ton', 50000)">50k</button>
-              <button type="button" class="budget-pill" data-type="ton" data-uzs="100000" onclick="setBudget('ton', 100000)">100k</button>
-              <button type="button" class="budget-pill" data-type="ton" data-uzs="250000" onclick="setBudget('ton', 250000)">250k</button>
-            </div>
-          </div>
-
           <div class="form-group" style="margin-top:12px;">
             <label class="form-label" for="tonAddressInput">Адрес вашего TON-кошелька</label>
             <input
@@ -445,7 +370,6 @@
               <span class="cost-label">Итого к оплате</span>
               <span class="cost-value" id="tonPriceText">20 000 сум</span>
             </div>
-            <div class="cost-kopecks-note" id="tonKopecksNote" style="display:none;"></div>
             <div class="benefit-badge">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
@@ -1045,8 +969,8 @@
 
   <div class="toast-notification" id="toast"></div>
 
-  <script src="src/utils/api.js?v=20"></script>
-  <script src="src/utils/helpers.js?v=20"></script>
-  <script src="src/app.js?v=20"></script>
+  <script src="src/utils/api.js?v=21"></script>
+  <script src="src/utils/helpers.js?v=21"></script>
+  <script src="src/app.js?v=21"></script>
 </body>
 </html>
