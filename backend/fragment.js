@@ -46,8 +46,11 @@ const FragmentService = {
    * Проверить актуальный баланс TON кошелька
    */
   async getWalletBalance() {
+    const config = this.getConfig();
+    const savedAddr = dao.getSetting('fragment_wallet_address');
+    const walletAddress = (savedAddr || config.walletAddress || DEFAULT_WALLET_ADDRESS).trim();
     try {
-      const res = await fetch(`https://toncenter.com/api/v2/getAddressInformation?address=${DEFAULT_WALLET_ADDRESS}`, {
+      const res = await fetch(`https://toncenter.com/api/v2/getAddressInformation?address=${encodeURIComponent(walletAddress)}`, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       });
       const data = await res.json();
@@ -58,12 +61,12 @@ const FragmentService = {
           success: true,
           balance: tonBalance,
           balanceFormatted: tonBalance.toFixed(3) + ' TON',
-          address: DEFAULT_WALLET_ADDRESS
+          address: walletAddress
         };
       }
-      return { success: false, balance: 0, error: 'Ошибка получения баланса' };
+      return { success: false, balance: 0, address: walletAddress, error: 'Ошибка получения баланса' };
     } catch (e) {
-      return { success: false, balance: 0, error: e.message };
+      return { success: false, balance: 0, address: walletAddress, error: e.message };
     }
   },
 
@@ -167,11 +170,16 @@ const FragmentService = {
           }
         }
 
+        const tonSpent = Number(
+          orderData.amount_ton ?? orderData.ton_amount ?? orderData.price_ton ?? orderData.ton ?? 0
+        ) || 0;
+
         console.log(`✅ [Fragment Order] Заказ #${order.id} успешно доставлен на ${targetUsername}!`);
         return {
           success: true,
           mode: 'fragment_api',
           txHash: txHash,
+          tonSpent,
           message: `Успешно отправлено: ${order.type === 'stars' ? order.amount + ' Stars' : order.amount + ' мес. Premium'} на ${targetUsername}`,
           deliveredAt: new Date().toISOString()
         };

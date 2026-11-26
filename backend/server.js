@@ -6,7 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { initDatabase, dao } = require('./database');
+const { initDatabase, dao, calculateCostUzs } = require('./database');
 const { authMiddleware } = require('./auth');
 const { FragmentService } = require('./fragment');
 const { CardXabarService } = require('./cardxabar');
@@ -193,6 +193,14 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
     : `Telegram Premium на ${order.amount} мес.`;
 
   if (fragmentRes.success) {
+    const curSettings = dao.getAllSettings();
+    const orderCostUzs = Number(order.cost_uzs || 0) > 0
+      ? Number(order.cost_uzs)
+      : calculateCostUzs(order.type, order.amount, curSettings);
+    dao.updateOrderDeliveryCost(orderId, {
+      costUzs: orderCostUzs,
+      tonSpent: fragmentRes.tonSpent || 0
+    });
     dao.updateOrderStatus(orderId, 'confirmed', source);
     await sendDeliveredClientMessage(order);
   } else {
@@ -208,6 +216,9 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
       console.warn('Не удалось уведомить клиента:', e.message);
     }
   }
+
+  // После попытки автовыдачи проверяем остаток TON (при падении ниже порога уведомим админа)
+  checkLowTonBalanceAndNotify({ triggerOrderId: orderId }).catch(() => {});
 
   if (!skipGroupNotice) {
     let fragmentNote = '';
@@ -260,9 +271,319 @@ async function completeOrderManually(orderId) {
   const order = dao.getOrder(orderId);
   if (!order) return { ok: false, reason: 'not_found' };
   if (order.status === 'confirmed') return { ok: false, reason: 'already_confirmed', order };
+  if (Number(order.cost_uzs || 0) <= 0) {
+    const estCost = calculateCostUzs(order.type, order.amount, dao.getAllSettings());
+    dao.updateOrderDeliveryCost(orderId, { costUzs: estCost, tonSpent: 0 });
+  }
   dao.updateOrderStatus(orderId, 'confirmed', 'manual');
   await sendDeliveredClientMessage(order);
   return { ok: true, order: dao.getOrder(orderId) };
+}
+
+// ===== Предпросмотр получателя, мониторинг TON, статистика и рассылка =====
+
+const recipientPreviewCache = new Map();
+const RECIPIENT_CACHE_TTL_MS = 5 * 60 * 1000;
+let lowTonCheckInFlight = false;
+let broadcastInProgress = false;
+
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;|&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .trim();
+}
+
+/**
+ * Получает имя, аватар и тип публичного @username через t.me с кэшированием.
+ */
+async function fetchTelegramRecipientPreview(rawUsername) {
+  const clean = String(rawUsername || '').replace(/^@+/, '').trim();
+  if (!/^[a-zA-Z0-9_]{4,32}$/.test(clean)) {
+    return {
+      valid: false,
+      status: 'invalid_format',
+      username: clean ? '@' + clean : '',
+      reason: 'Username должен содержать от 4 символов (латиница, цифры, _)'
+    };
+  }
+
+  const cacheKey = clean.toLowerCase();
+  const cached = recipientPreviewCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < RECIPIENT_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(`https://t.me/${encodeURIComponent(clean)}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NateStarsPreview/1.0)' },
+      signal: controller.signal
+    });
+    const html = await res.text();
+
+    const meta = (prop) => {
+      const m = html.match(new RegExp(`<meta\\s+property=["']${prop}["']\\s+content=["']([^"']*)["']`, 'i'));
+      return m ? decodeHtmlEntities(m[1]) : '';
+    };
+    const extraMatch = html.match(/class="tgme_page_extra"[^>]*>([\s\S]*?)<\/div>/i);
+    const extra = extraMatch ? decodeHtmlEntities(extraMatch[1].replace(/<[^>]+>/g, '')) : '';
+    const titleMatch = html.match(/class="tgme_page_title"[^>]*>([\s\S]*?)<\/div>/i);
+    const pageTitle = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/<[^>]+>/g, '')) : '';
+    const actionMatch = html.match(/class="tgme_action_button_new[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
+    const actionBtn = actionMatch ? decodeHtmlEntities(actionMatch[1].replace(/<[^>]+>/g, '')) : '';
+
+    const ogTitle = meta('og:title');
+    const ogImage = meta('og:image');
+    const hasPhoto = /tgme_page_photo_image/i.test(html) && ogImage && !ogImage.includes('telegram.org/img/t_logo');
+    const displayName = pageTitle || ogTitle || '@' + clean;
+
+    let result;
+    if (!extra) {
+      result = {
+        valid: false,
+        status: 'not_found',
+        username: '@' + clean,
+        displayName: '@' + clean,
+        avatarUrl: null,
+        reason: 'Аккаунт с таким @username не найден'
+      };
+    } else if (/subscribers|members|подписчик|участник/i.test(extra)) {
+      result = {
+        valid: false,
+        status: 'channel_or_group',
+        username: '@' + clean,
+        displayName,
+        avatarUrl: hasPhoto ? ogImage : null,
+        reason: 'Это канал или группа — укажите личный @username'
+      };
+    } else if (/^start bot$/i.test(actionBtn)) {
+      result = {
+        valid: false,
+        status: 'is_bot',
+        username: '@' + clean,
+        displayName,
+        avatarUrl: hasPhoto ? ogImage : null,
+        reason: 'Это бот — звёзды и Premium дарятся личному аккаунту'
+      };
+    } else {
+      result = {
+        valid: true,
+        status: 'ok',
+        username: extra.startsWith('@') ? extra : '@' + clean,
+        displayName,
+        avatarUrl: hasPhoto ? ogImage : null
+      };
+    }
+
+    if (recipientPreviewCache.size > 500) {
+      recipientPreviewCache.clear();
+    }
+    recipientPreviewCache.set(cacheKey, { ts: Date.now(), data: result });
+    return result;
+  } catch (err) {
+    return {
+      valid: true,
+      status: 'lookup_unavailable',
+      username: '@' + clean,
+      displayName: '@' + clean,
+      avatarUrl: null
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Проверяет баланс TON-кошелька Fragment и уведомляет админа при падении ниже порога.
+ */
+async function checkLowTonBalanceAndNotify({ force = false, triggerOrderId = null } = {}) {
+  if (lowTonCheckInFlight) return null;
+  lowTonCheckInFlight = true;
+  try {
+    const balanceRes = await FragmentService.getWalletBalance();
+    if (!balanceRes || !balanceRes.success) return balanceRes;
+
+    const settings = dao.getAllSettings();
+    const threshold = Math.max(0.5, Number(settings.low_ton_threshold || 5));
+    const current = Number(balanceRes.balance || 0);
+    const lastAlertAt = Number(settings.last_low_ton_alert_at || 0);
+    const lastAlertBal = settings.last_low_ton_alert_balance !== '' ? Number(settings.last_low_ton_alert_balance) : null;
+    const now = Date.now();
+
+    if (current >= threshold) {
+      if (lastAlertAt > 0) {
+        dao.setSetting('last_low_ton_alert_at', '0');
+        dao.setSetting('last_low_ton_alert_balance', '');
+      }
+      return { ...balanceRes, threshold, low: false };
+    }
+
+    const cooldownPassed = !lastAlertAt || (now - lastAlertAt) >= 4 * 60 * 60 * 1000;
+    const droppedCritical = current < 1 && (lastAlertBal === null || lastAlertBal >= 1);
+
+    if (force || cooldownPassed || droppedCritical) {
+      dao.setSetting('last_low_ton_alert_at', String(now));
+      dao.setSetting('last_low_ton_alert_balance', current.toFixed(3));
+
+      const isCritical = current < 1;
+      const title = isCritical
+        ? '🚨 <b>КРИТИЧЕСКИ НИЗКИЙ БАЛАНС TON!</b>'
+        : '⚠️ <b>Низкий баланс TON на кошельке</b>';
+      const orderNote = triggerOrderId ? `\nПосле заказа: <code>#${escapeHtml(triggerOrderId)}</code>\n` : '\n';
+      const criticalNote = isCritical
+        ? '\n❗ <i>Меньше 1 TON — автовыдача Fragment временно не сможет отправлять заказы, клиенты будут видеть статус ожидания.</i>'
+        : '\n<i>Рекомендуем пополнить кошелёк заранее, чтобы автовыдача не останавливалась.</i>';
+
+      const msg =
+        `${title}\n` +
+        orderNote +
+        `• Текущий остаток: <b>${current.toFixed(3)} TON</b>\n` +
+        `• Порог уведомления: <b>${threshold} TON</b>\n` +
+        `• Кошелёк: <code>${escapeHtml(balanceRes.address || '')}</code>` +
+        criticalNote;
+
+      for (const adminId of getAdminIds()) {
+        try {
+          await bot.telegram.sendMessage(adminId, msg, { parse_mode: 'HTML' });
+        } catch (e) {
+          console.warn('Не удалось отправить уведомление о балансе TON:', e.message);
+        }
+      }
+    }
+
+    return { ...balanceRes, threshold, low: true };
+  } finally {
+    lowTonCheckInFlight = false;
+  }
+}
+
+function formatProfitReportText(profitStats, walletBalance, threshold) {
+  const fmtPeriod = (label, b) => (
+    `<b>${label}:</b>\n` +
+    `• Заказов: <b>${b.orders}</b> (⭐ ${b.starsCount.toLocaleString('ru-RU')} шт. · Premium: ${b.premiumCount})\n` +
+    `• Оборот: <b>${formatUzs(b.revenueUzs)}</b>\n` +
+    `• Себест.: ${formatUzs(b.costUzs)} → <b>Прибыль: ${formatUzs(b.profitUzs)}</b> (${b.marginPct}%)`
+  );
+
+  const balStr = walletBalance?.success
+    ? `<b>${walletBalance.balanceFormatted}</b> (порог: ${threshold} TON)`
+    : 'не удалось получить';
+
+  return (
+    `📊 <b>Статистика прибыли Nate Stars</b>\n` +
+    `💰 Баланс TON: ${balStr}\n\n` +
+    `${fmtPeriod('Сегодня (Ташкент)', profitStats.today)}\n\n` +
+    `${fmtPeriod('За 7 дней', profitStats.week)}\n\n` +
+    `${fmtPeriod('За 30 дней', profitStats.month)}\n\n` +
+    `${fmtPeriod('За всё время', profitStats.all)}`
+  );
+}
+
+/**
+ * Безопасная отправка одного сообщения рассылки с fallback при ошибке HTML-разметки.
+ */
+async function sendBroadcastPayload(chatId, { text, photoFileId = null, replyMarkup = undefined }) {
+  if (photoFileId) {
+    try {
+      return await bot.telegram.sendPhoto(chatId, photoFileId, {
+        caption: text || '',
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+    } catch (e) {
+      if (e?.response?.error_code === 400 && /parse/i.test(e.message || '')) {
+        return await bot.telegram.sendPhoto(chatId, photoFileId, {
+          caption: text || '',
+          reply_markup: replyMarkup
+        });
+      }
+      throw e;
+    }
+  }
+
+  try {
+    return await bot.telegram.sendMessage(chatId, text, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup
+    });
+  } catch (e) {
+    if (e?.response?.error_code === 400 && /parse/i.test(e.message || '')) {
+      return await bot.telegram.sendMessage(chatId, text, {
+        disable_web_page_preview: true,
+        reply_markup: replyMarkup
+      });
+    }
+    throw e;
+  }
+}
+
+async function runAdminBroadcast({ text, photoFileId = null, includeOpenButton = true }) {
+  if (broadcastInProgress) {
+    throw new Error('Рассылка уже выполняется, дождитесь завершения');
+  }
+  broadcastInProgress = true;
+  try {
+    const users = dao.getActiveUsersForBroadcast();
+    const urlToUse = WEBAPP_URL || `http://localhost:${PORT}`;
+    const replyMarkup = includeOpenButton && urlToUse.startsWith('https://')
+      ? { inline_keyboard: [[{ text: 'Открыть Nate Stars', web_app: { url: urlToUse } }]] }
+      : undefined;
+
+    let sent = 0;
+    let blocked = 0;
+    let failed = 0;
+
+    for (const u of users) {
+      try {
+        await sendBroadcastPayload(u.telegram_id, { text, photoFileId, replyMarkup });
+        sent += 1;
+      } catch (err) {
+        const code = err?.response?.error_code;
+        if (code === 429) {
+          const waitSec = Number(err.response?.parameters?.retry_after || 2);
+          await new Promise(r => setTimeout(r, (waitSec + 1) * 1000));
+          try {
+            await sendBroadcastPayload(u.telegram_id, { text, photoFileId, replyMarkup });
+            sent += 1;
+            continue;
+          } catch (retryErr) {
+            if (retryErr?.response?.error_code === 403) {
+              dao.markUserBlocked(u.telegram_id, true);
+              blocked += 1;
+            } else {
+              failed += 1;
+            }
+            continue;
+          }
+        }
+        if (code === 403) {
+          dao.markUserBlocked(u.telegram_id, true);
+          blocked += 1;
+        } else {
+          failed += 1;
+        }
+      }
+      await new Promise(r => setTimeout(r, 45));
+    }
+
+    return {
+      total: users.length,
+      sent,
+      blocked,
+      failed,
+      broadcastStats: dao.getBroadcastStats()
+    };
+  } finally {
+    broadcastInProgress = false;
+  }
 }
 
 async function handleCardXabarPayment({ amount, cardLast4, msgId, msgDateMs }) {
@@ -333,23 +654,87 @@ app.get('/api/user', auth, (req, res) => {
   });
 });
 
-// Админ-панель: сводка данных, настройки и ожидающие заказы
-app.get('/api/admin/info', auth, requireAdmin, (req, res) => {
+// Предпросмотр получателя по @username (имя, аватарка, проверка на бота/канал)
+app.get('/api/recipient-preview', auth, async (req, res) => {
+  try {
+    const username = String(req.query.username || '').trim();
+    if (!username) {
+      return res.status(400).json({ valid: false, status: 'empty', reason: 'Укажите @username' });
+    }
+    const preview = await fetchTelegramRecipientPreview(username);
+    res.json(preview);
+  } catch (err) {
+    res.json({ valid: true, status: 'lookup_unavailable', username: '@' + String(req.query.username || '').replace(/^@+/, '') });
+  }
+});
+
+// Админ-панель: сводка данных, статистика прибыли, баланс TON и ожидающие заказы
+app.get('/api/admin/info', auth, requireAdmin, async (req, res) => {
   const settings = dao.getAllSettings();
   const stats = dao.getStats();
+  const profitStats = dao.getProfitStats(settings);
+  const broadcastStats = dao.getBroadcastStats();
   const pendingOrders = dao.getPendingOrders();
   const fragmentConfig = FragmentService.getConfig();
   const cardXabarStatus = CardXabarService.getStatus();
+  const walletBalance = await Promise.race([
+    FragmentService.getWalletBalance(),
+    new Promise(resolve => setTimeout(() => resolve({ success: false, balance: 0, error: 'Таймаут' }), 4000))
+  ]);
   res.json({
     settings,
     stats,
+    profitStats,
+    broadcastStats,
+    walletBalance,
     pendingOrders,
     fragmentConfig,
     cardXabarStatus
   });
 });
 
-// Админ-панель: сохранение настроек из Mini App (включая Fragment и автоподтверждение)
+// Админ-панель: проверка актуального баланса TON-кошелька
+app.get('/api/admin/ton-balance', auth, requireAdmin, async (req, res) => {
+  const settings = dao.getAllSettings();
+  const threshold = Number(settings.low_ton_threshold || 5);
+  const balance = await FragmentService.getWalletBalance();
+  res.json({ ...balance, threshold });
+});
+
+// Админ-панель: тестовая рассылка самому себе (предпросмотр)
+app.post('/api/admin/broadcast/test', auth, requireAdmin, async (req, res) => {
+  try {
+    const text = String(req.body?.text || '').trim();
+    const includeOpenButton = req.body?.includeOpenButton !== false;
+    if (!text) return res.status(400).json({ error: 'Введите текст сообщения для рассылки' });
+
+    const urlToUse = WEBAPP_URL || `http://localhost:${PORT}`;
+    const replyMarkup = includeOpenButton && urlToUse.startsWith('https://')
+      ? { inline_keyboard: [[{ text: 'Открыть Nate Stars', web_app: { url: urlToUse } }]] }
+      : undefined;
+
+    await sendBroadcastPayload(req.telegramUser.id, { text, replyMarkup });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Ошибка отправки теста' });
+  }
+});
+
+// Админ-панель: запуск рассылки по базе пользователей бота
+app.post('/api/admin/broadcast/send', auth, requireAdmin, async (req, res) => {
+  try {
+    const text = String(req.body?.text || '').trim();
+    const includeOpenButton = req.body?.includeOpenButton !== false;
+    if (!text) return res.status(400).json({ error: 'Введите текст сообщения для рассылки' });
+
+    const result = await runAdminBroadcast({ text, includeOpenButton });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Ошибка рассылки' });
+  }
+});
+
+// Админ-панель: сохранение настроек из Mini App (включая Fragment, себестоимость, порог TON и автоподтверждение)
 app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
   const {
     starPriceUzs,
@@ -364,7 +749,12 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
     fragmentPhone,
     fragmentMnemonics,
     fragmentApiKey,
-    autoConfirmEnabled
+    autoConfirmEnabled,
+    lowTonThreshold,
+    costStarUzs,
+    costPrem3Uzs,
+    costPrem6Uzs,
+    costPrem12Uzs
   } = req.body;
 
   if (starPriceUzs) dao.setSetting('star_price_uzs', String(starPriceUzs));
@@ -376,6 +766,11 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
   if (premium12Uzs) dao.setSetting('premium_12_uzs', String(premium12Uzs));
   if (ordersChatId !== undefined) dao.setSetting('orders_chat_id', String(ordersChatId));
   if (autoConfirmEnabled !== undefined) dao.setSetting('auto_confirm_enabled', String(autoConfirmEnabled));
+  if (lowTonThreshold !== undefined && lowTonThreshold !== '') dao.setSetting('low_ton_threshold', String(lowTonThreshold));
+  if (costStarUzs !== undefined && costStarUzs !== '') dao.setSetting('cost_star_uzs', String(costStarUzs));
+  if (costPrem3Uzs !== undefined && costPrem3Uzs !== '') dao.setSetting('cost_prem_3_uzs', String(costPrem3Uzs));
+  if (costPrem6Uzs !== undefined && costPrem6Uzs !== '') dao.setSetting('cost_prem_6_uzs', String(costPrem6Uzs));
+  if (costPrem12Uzs !== undefined && costPrem12Uzs !== '') dao.setSetting('cost_prem_12_uzs', String(costPrem12Uzs));
 
   // Настройки Fragment
   if (fragmentEnabled !== undefined) dao.setSetting('fragment_enabled', String(fragmentEnabled));
@@ -598,6 +993,7 @@ app.post('/api/orders/prepare', auth, (req, res) => {
     }
 
     const finalPriceUzs = autoConfirm ? dao.allocateUniquePrice(basePriceUzs) : basePriceUzs;
+    const costUzs = calculateCostUzs(type, amount, settings);
     const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
 
     dao.createOrder({
@@ -609,6 +1005,7 @@ app.post('/api/orders/prepare', auth, (req, res) => {
       amount: Number(amount),
       priceUzs: finalPriceUzs,
       basePriceUzs,
+      costUzs,
       cardNumber,
       status: 'awaiting_payment',
       senderComment: ''
@@ -737,6 +1134,7 @@ app.post('/api/create-order', auth, async (req, res) => {
     const { basePriceUzs, itemDescription } = calc;
     const autoConfirm = settings.auto_confirm_enabled === 'true';
     const priceUzs = autoConfirm ? dao.allocateUniquePrice(basePriceUzs) : basePriceUzs;
+    const costUzs = calculateCostUzs(type, amount, settings);
     const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
     const cardNumber = settings.card_number || '5614681816265841';
 
@@ -749,6 +1147,7 @@ app.post('/api/create-order', auth, async (req, res) => {
       amount: Number(amount),
       priceUzs,
       basePriceUzs,
+      costUzs,
       cardNumber,
       status: 'pending',
       senderComment
@@ -782,6 +1181,21 @@ app.get('/api/orders', auth, (req, res) => {
 });
 
 // ===== БОТ: Команды и Кнопки =====
+
+// Сохраняем в базу всех пользователей, взаимодействующих с ботом в ЛС (для рассылки и учёта)
+bot.use(async (ctx, next) => {
+  try {
+    if (ctx.chat?.type === 'private' && ctx.from?.id && !ctx.from.is_bot) {
+      dao.upsertUser({
+        telegramId: ctx.from.id,
+        username: ctx.from.username,
+        firstName: ctx.from.first_name,
+        lastName: ctx.from.last_name
+      });
+    }
+  } catch (e) {}
+  return next();
+});
 
 // Команда /start
 bot.start(async (ctx) => {
@@ -866,17 +1280,120 @@ bot.command('admin', async (ctx) => {
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [
+        [
+          { text: '📊 Прибыль', callback_data: 'admin_stats' },
+          { text: '💰 Баланс TON', callback_data: 'admin_ton_balance' }
+        ],
+        [
+          { text: '📣 Рассылка', callback_data: 'admin_broadcast' },
+          { text: '📋 Ожидающие заказы', callback_data: 'view_pending_orders' }
+        ],
         [{ text: 'Цена за 1 звезду', callback_data: 'edit_star_price' }],
         [
           { text: 'Premium 3м', callback_data: 'edit_prem_3' },
           { text: 'Premium 6м', callback_data: 'edit_prem_6' },
           { text: 'Premium 12м', callback_data: 'edit_prem_12' }
         ],
-        [{ text: 'Номер карты', callback_data: 'edit_card_number' }],
-        [{ text: 'Ожидающие заказы', callback_data: 'view_pending_orders' }]
+        [
+          { text: 'Номер карты', callback_data: 'edit_card_number' },
+          { text: 'Порог TON', callback_data: 'edit_low_ton' }
+        ]
       ]
     }
   });
+});
+
+// Статистика прибыли в боте
+bot.action('admin_stats', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+  await ctx.answerCbQuery();
+  const settings = dao.getAllSettings();
+  const profitStats = dao.getProfitStats(settings);
+  const threshold = Number(settings.low_ton_threshold || 5);
+  const walletBalance = await FragmentService.getWalletBalance();
+  await ctx.reply(formatProfitReportText(profitStats, walletBalance, threshold), { parse_mode: 'HTML' });
+});
+
+// Баланс TON кошелька в боте
+bot.action('admin_ton_balance', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+  await ctx.answerCbQuery();
+  const settings = dao.getAllSettings();
+  const threshold = Number(settings.low_ton_threshold || 5);
+  const wallet = await FragmentService.getWalletBalance();
+  const statusLine = !wallet.success
+    ? `⚠️ Ошибка проверки: ${escapeHtml(wallet.error || 'сеть недоступна')}`
+    : wallet.balance < threshold
+      ? `⚠️ <b>Ниже порога (${threshold} TON)!</b> Пополните кошелёк.`
+      : `✅ Баланс в норме (порог: ${threshold} TON)`;
+  await ctx.reply(
+    `💰 <b>Баланс кошелька Fragment</b>\n\n` +
+    `• Остаток: <b>${wallet.success ? wallet.balanceFormatted : '—'}</b>\n` +
+    `• Адрес: <code>${escapeHtml(wallet.address || '')}</code>\n` +
+    `${statusLine}`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[{ text: 'Изменить порог TON', callback_data: 'edit_low_ton' }]]
+      }
+    }
+  );
+});
+
+const pendingBotBroadcasts = new Map();
+
+// Запуск рассылки из бота
+bot.action('admin_broadcast', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+  await ctx.answerCbQuery();
+  const bStats = dao.getBroadcastStats();
+  adminStates.set(userId, 'awaiting_broadcast_content');
+  await ctx.reply(
+    `📣 <b>Рассылка пользователям бота</b>\n\n` +
+    `В базе: <b>${bStats.total}</b> чел. (доступно для отправки: <b>${bStats.active}</b>)\n\n` +
+    `Отправьте следующим сообщением <b>текст</b> или <b>фото с подписью</b> для рассылки (поддерживается HTML-форматирование). Для отмены напишите <code>отмена</code>.`,
+    { parse_mode: 'HTML' }
+  );
+});
+
+bot.action('confirm_broadcast_bot', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+  const payload = pendingBotBroadcasts.get(userId);
+  if (!payload) return ctx.answerCbQuery('Черновик рассылки не найден или уже отправлен');
+  pendingBotBroadcasts.delete(userId);
+
+  await ctx.answerCbQuery('Рассылка запущена...');
+  try {
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+    const statusMsg = await ctx.reply('⏳ Отправка сообщений пользователям...');
+    const result = await runAdminBroadcast(payload);
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      undefined,
+      `✅ <b>Рассылка завершена!</b>\n\n` +
+      `• Всего в очереди: <b>${result.total}</b>\n` +
+      `• Доставлено: <b>${result.sent}</b>\n` +
+      `• Заблокировали бота: <b>${result.blocked}</b>\n` +
+      `• Прочих ошибок: <b>${result.failed}</b>`,
+      { parse_mode: 'HTML' }
+    ).catch(() => {});
+  } catch (err) {
+    await ctx.reply(`❌ Ошибка рассылки: ${escapeHtml(err.message)}`, { parse_mode: 'HTML' });
+  }
+});
+
+bot.action('cancel_broadcast_bot', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return ctx.answerCbQuery('Нет доступа');
+  pendingBotBroadcasts.delete(userId);
+  adminStates.delete(userId);
+  await ctx.answerCbQuery('Рассылка отменена');
+  await ctx.editMessageText('❌ Рассылка отменена.').catch(() => {});
 });
 
 // Обработка кнопок админки
@@ -907,6 +1424,10 @@ bot.action(/edit_(.+)/, async (ctx) => {
     case 'card_number':
       adminStates.set(userId, 'set_card_number');
       promptText = 'Введите новый номер карты (16 цифр):';
+      break;
+    case 'low_ton':
+      adminStates.set(userId, 'set_low_ton_threshold');
+      promptText = 'Введите порог уведомления о низком балансе TON (например: <code>5</code> или <code>2.5</code>):';
       break;
     default:
       return ctx.answerCbQuery();
@@ -1223,6 +1744,40 @@ bot.action(/reject_(.+)/, async (ctx) => {
   return bot.handleUpdate({ ...ctx.update, callback_query: { ...ctx.callbackQuery, data: `pre_reject_${orderId}` } });
 });
 
+// Обработка фото для рассылки админом
+bot.on('photo', async (ctx, next) => {
+  const userId = ctx.from.id;
+  const state = adminStates.get(userId);
+  if (state !== 'awaiting_broadcast_content' || !isAdmin(userId)) return next();
+
+  adminStates.delete(userId);
+  const photos = ctx.message.photo || [];
+  const bestPhoto = photos[photos.length - 1];
+  const caption = (ctx.message.caption || '').trim();
+  const bStats = dao.getBroadcastStats();
+
+  pendingBotBroadcasts.set(userId, {
+    text: caption,
+    photoFileId: bestPhoto?.file_id || null,
+    includeOpenButton: true
+  });
+
+  await ctx.reply(
+    `📣 <b>Предпросмотр рассылки с фото</b>\n` +
+    `Получателей: <b>${bStats.active}</b> чел.\n\n` +
+    `${caption ? escapeHtml(caption) : '<i>(без подписи)</i>'}`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `✅ Отправить (${bStats.active} чел.)`, callback_data: 'confirm_broadcast_bot' }],
+          [{ text: '❌ Отмена', callback_data: 'cancel_broadcast_bot' }]
+        ]
+      }
+    }
+  );
+});
+
 // Ввод текстовых данных админом
 bot.on('text', async (ctx, next) => {
   const userId = ctx.from.id;
@@ -1232,6 +1787,33 @@ bot.on('text', async (ctx, next) => {
 
   const text = ctx.message.text.trim();
   adminStates.delete(userId);
+
+  if (state === 'awaiting_broadcast_content') {
+    if (/^отмена$/i.test(text)) {
+      pendingBotBroadcasts.delete(userId);
+      return ctx.reply('❌ Рассылка отменена.');
+    }
+    const bStats = dao.getBroadcastStats();
+    pendingBotBroadcasts.set(userId, {
+      text,
+      photoFileId: null,
+      includeOpenButton: true
+    });
+    return ctx.reply(
+      `📣 <b>Предпросмотр рассылки</b>\n` +
+      `Получателей: <b>${bStats.active}</b> чел.\n\n` +
+      `${escapeHtml(text)}`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: `✅ Отправить (${bStats.active} чел.)`, callback_data: 'confirm_broadcast_bot' }],
+            [{ text: '❌ Отмена', callback_data: 'cancel_broadcast_bot' }]
+          ]
+        }
+      }
+    );
+  }
 
   switch (state) {
     case 'set_star_price': {
@@ -1263,6 +1845,13 @@ bot.on('text', async (ctx, next) => {
       if (clean.length < 12) return ctx.reply('Номер карты должен содержать от 16 цифр.');
       dao.setSetting('card_number', clean);
       return ctx.reply(`Новый номер карты сохранён: <code>${clean}</code>`, { parse_mode: 'HTML' });
+    }
+    case 'set_low_ton_threshold': {
+      const val = parseFloat(text.replace(',', '.'));
+      if (isNaN(val) || val < 0.5) return ctx.reply('Введите число не меньше 0.5 (например: 5).');
+      dao.setSetting('low_ton_threshold', String(val));
+      dao.setSetting('last_low_ton_alert_at', '0');
+      return ctx.reply(`Порог уведомления о низком TON сохранён: <b>${val} TON</b>`, { parse_mode: 'HTML' });
     }
   }
 
@@ -1367,6 +1956,7 @@ async function startTunnelProcess() {
 
 // ===== Запуск =====
 let tunnelProc = null;
+let tonMonitorTimer = null;
 
 async function start() {
   try {
@@ -1416,6 +2006,14 @@ async function start() {
       console.warn('⚠️ Ошибка запуска CardXabar:', err.message);
     });
 
+    // Мониторинг остатка TON на кошельке Fragment (при старте и каждые 10 минут)
+    setTimeout(() => {
+      checkLowTonBalanceAndNotify().catch(() => {});
+    }, 15000);
+    tonMonitorTimer = setInterval(() => {
+      checkLowTonBalanceAndNotify().catch(() => {});
+    }, 10 * 60 * 1000);
+
     console.log(`\n🎉 Всё готово! Бот: https://t.me/${botInfo.username}\n`);
 
   } catch (err) {
@@ -1426,6 +2024,7 @@ async function start() {
 
 async function shutdown() {
   console.log('\nОстановка сервисов...');
+  if (tonMonitorTimer) clearInterval(tonMonitorTimer);
   await CardXabarService.stopListenerOnly();
   if (tunnelProc) tunnelProc.kill();
   bot.stop();

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="src/styles/main.css?v=14">
+  <link rel="stylesheet" href="src/styles/main.css?v=15">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     if (window.Telegram && window.Telegram.WebApp) {
@@ -91,6 +91,7 @@
           Подарок
         </div>
       </div>
+      <div id="recipientPreviewBox" class="recipient-preview-card" style="display:none;"></div>
     </section>
 
     <!-- Segmented Navigation (Tabs) -->
@@ -340,6 +341,61 @@
           </div>
         </div>
 
+        <!-- TON Wallet Balance Monitor -->
+        <div class="glass-card ton-balance-card" id="adminTonBalanceCard">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+            <div>
+              <span class="metric-label" style="display:block;">Баланс TON кошелька Fragment</span>
+              <div style="display:flex; align-items:baseline; gap:8px; margin-top:3px;">
+                <span class="metric-val" id="adminTonBalanceVal" style="font-size:1.15rem;">— TON</span>
+                <span id="adminTonStatusBadge" class="status-badge-clean pending">Проверка...</span>
+              </div>
+            </div>
+            <button type="button" class="ghost-refresh-btn" onclick="refreshAdminTonBalance()">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
+              Обновить
+            </button>
+          </div>
+          <div class="field-help" id="adminTonAddressHint" style="margin-top:6px;">Порог уведомления: 5 TON</div>
+        </div>
+
+        <!-- Profit Analytics Card -->
+        <div class="glass-card profit-card" id="adminProfitCard">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
+            <h3 class="card-title" style="margin:0;">Статистика прибыли</h3>
+            <span class="status-badge-clean confirmed" id="profitMarginBadge">0%</span>
+          </div>
+          <div class="period-pills">
+            <button type="button" class="period-pill active" data-period="today" onclick="switchProfitPeriod('today')">Сегодня</button>
+            <button type="button" class="period-pill" data-period="week" onclick="switchProfitPeriod('week')">7 дней</button>
+            <button type="button" class="period-pill" data-period="month" onclick="switchProfitPeriod('month')">30 дней</button>
+            <button type="button" class="period-pill" data-period="all" onclick="switchProfitPeriod('all')">Всё</button>
+          </div>
+          <div class="profit-grid">
+            <div class="profit-box">
+              <span class="metric-label">Чистая прибыль</span>
+              <span class="profit-val profit-ok" id="profitNetVal">0 сум</span>
+            </div>
+            <div class="profit-box">
+              <span class="metric-label">Оборот</span>
+              <span class="profit-val" id="profitRevVal">0 сум</span>
+            </div>
+            <div class="profit-box">
+              <span class="metric-label">Себестоимость</span>
+              <span class="profit-val muted" id="profitCostVal">0 сум</span>
+            </div>
+            <div class="profit-box">
+              <span class="metric-label">Продажи</span>
+              <span class="profit-val" id="profitSalesVal">0 зак.</span>
+            </div>
+          </div>
+          <div class="field-help" id="profitDetailHint" style="margin-top:8px;">Расчёт по себестоимости из настроек (Ташкент UTC+5)</div>
+        </div>
+
         <!-- Pending Orders in Admin -->
         <div class="admin-subhead">
           <span class="field-label">Ожидают вашего подтверждения</span>
@@ -393,9 +449,67 @@
             <span class="field-help">Заказы автоматически отправляются в эту группу с кнопками</span>
           </div>
 
+          <div class="admin-divider-title">Себестоимость (для прибыли) и баланс TON</div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingCostStar">Себест. 1 ★ (сум)</label>
+              <input type="number" id="settingCostStar" class="form-control" placeholder="195">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingLowTonThreshold">Порог TON</label>
+              <input type="number" step="0.5" id="settingLowTonThreshold" class="form-control" placeholder="5">
+            </div>
+          </div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
+              <label class="form-label" for="settingCostPrem3">Себест. Prem 3м</label>
+              <input type="number" id="settingCostPrem3" class="form-control" placeholder="155000">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingCostPrem6">Себест. Prem 6м</label>
+              <input type="number" id="settingCostPrem6" class="form-control" placeholder="207000">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingCostPrem12">Себест. Premium 12м (сум)</label>
+            <input type="number" id="settingCostPrem12" class="form-control" placeholder="370000">
+          </div>
+
           <button class="cta-primary-btn" id="saveSettingsBtn" onclick="saveAdminSettings()">
             <span>Сохранить тарифы</span>
           </button>
+        </div>
+
+        <!-- Bot Broadcast Card -->
+        <div class="glass-card admin-settings-card" style="margin-top: 14px;" id="broadcastAdminCard">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px;">
+            <h3 class="card-title" style="margin:0;">Рассылка по базе бота</h3>
+            <span id="broadcastAudienceBadge" class="status-badge-clean processing">В базе: 0</span>
+          </div>
+          <p class="field-help" style="margin-bottom: 10px;">Отправка сообщения всем пользователям, запускавшим бота (поддерживается HTML: &lt;b&gt;, &lt;i&gt;, &lt;code&gt;)</p>
+
+          <div class="form-group">
+            <textarea id="broadcastTextInput" class="form-control" rows="4" placeholder="Например: ⚡ Снизили цену на Telegram Stars! 1 ★ = 205 сум. Успейте оформить заказ в магазине."></textarea>
+          </div>
+
+          <label class="checkbox-row">
+            <input type="checkbox" id="broadcastIncludeBtn" checked>
+            <span>Добавить кнопку «Открыть Nate Stars» под сообщением</span>
+          </label>
+
+          <div id="broadcastActionRow" style="display:flex; gap:8px; margin-top:10px;">
+            <button type="button" class="cta-secondary-btn" style="flex:1; padding:11px; font-size:0.78rem;" id="broadcastTestBtn" onclick="sendBroadcastTest()">
+              <span>Тест мне</span>
+            </button>
+            <button type="button" class="cta-primary-btn" style="flex:1.4; padding:11px; font-size:0.78rem;" id="broadcastSendBtn" onclick="promptAdminBroadcast()">
+              <span>Отправить всем</span>
+            </button>
+          </div>
+
+          <div id="broadcastResultBox" class="field-help" style="margin-top:8px; display:none;"></div>
         </div>
 
         <!-- CardXabar Auto-Confirm Card -->
@@ -684,8 +798,8 @@
 
   <div class="toast-notification" id="toast"></div>
 
-  <script src="src/utils/api.js?v=14"></script>
-  <script src="src/utils/helpers.js?v=14"></script>
-  <script src="src/app.js?v=14"></script>
+  <script src="src/utils/api.js?v=15"></script>
+  <script src="src/utils/helpers.js?v=15"></script>
+  <script src="src/app.js?v=15"></script>
 </body>
 </html>

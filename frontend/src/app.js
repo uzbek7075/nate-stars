@@ -31,6 +31,12 @@ let pendingOrder = null;
 let orderPollTimer = null;
 let cxQrPollTimer = null;
 let cachedCxStatus = null;
+let recipientPreviewTimer = null;
+let recipientPreviewSeq = 0;
+let lastRecipientPreview = null;
+let cachedProfitStats = null;
+let selectedProfitPeriod = 'today';
+let cachedLowTonThreshold = 5;
 
 // ===== Инициализация =====
 document.addEventListener('DOMContentLoaded', () => {
@@ -39,23 +45,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function initApp() {
   const currentTgId = tg?.initDataUnsafe?.user?.id;
+  const recipientInput = document.getElementById('recipientInput');
 
   if (tg?.initDataUnsafe?.user) {
     const user = tg.initDataUnsafe.user;
     const nameEl = document.getElementById('userName');
     if (nameEl) nameEl.textContent = user.first_name || 'Клиент';
 
-    const recipientInput = document.getElementById('recipientInput');
-    if (recipientInput) {
-      if (user.username) {
-        recipientInput.value = user.username;
-      }
-      recipientInput.addEventListener('input', () => {
-        if (recipientInput.value.startsWith('@')) {
-          recipientInput.value = recipientInput.value.replace(/^@+/, '');
-        }
-      });
+    if (recipientInput && user.username) {
+      recipientInput.value = user.username;
+      fetchRecipientPreview(user.username);
     }
+  }
+
+  if (recipientInput) {
+    recipientInput.addEventListener('input', () => {
+      if (recipientInput.value.startsWith('@')) {
+        recipientInput.value = recipientInput.value.replace(/^@+/, '');
+      }
+      scheduleRecipientPreview(recipientInput.value);
+    });
   }
 
   // Проверяем статус администратора и активные заказы пользователя
@@ -189,6 +198,159 @@ function getRecipient() {
   return val;
 }
 
+// ===== Предпросмотр получателя (@username) =====
+
+function scheduleRecipientPreview(rawVal) {
+  if (recipientPreviewTimer) clearTimeout(recipientPreviewTimer);
+  const clean = String(rawVal || '').trim().replace(/^@+/, '');
+  if (!clean) {
+    lastRecipientPreview = null;
+    renderRecipientPreview(null);
+    return;
+  }
+  if (clean.length < 4) {
+    lastRecipientPreview = null;
+    renderRecipientPreview({
+      status: 'too_short',
+      valid: false,
+      username: '@' + clean,
+      displayName: '@' + clean,
+      reason: 'Введите минимум 4 символа @username'
+    });
+    return;
+  }
+  recipientPreviewTimer = setTimeout(() => {
+    fetchRecipientPreview(clean);
+  }, 450);
+}
+
+async function fetchRecipientPreview(rawVal) {
+  const clean = String(rawVal || '').trim().replace(/^@+/, '');
+  const seq = ++recipientPreviewSeq;
+  if (!clean || clean.length < 4) {
+    lastRecipientPreview = null;
+    renderRecipientPreview(null);
+    return null;
+  }
+
+  renderRecipientPreview({ loading: true, username: '@' + clean });
+
+  try {
+    const data = await API.getRecipientPreview(clean);
+    if (seq !== recipientPreviewSeq) return null;
+
+    // Если это сам текущий пользователь и в t.me скрыто фото, подставляем данные из WebApp initDataUnsafe
+    const selfUser = tg?.initDataUnsafe?.user;
+    if (data && data.valid && selfUser?.username && selfUser.username.toLowerCase() === clean.toLowerCase()) {
+      if (!data.avatarUrl && selfUser.photo_url) data.avatarUrl = selfUser.photo_url;
+      if ((!data.displayName || data.displayName === '@' + clean) && selfUser.first_name) {
+        data.displayName = [selfUser.first_name, selfUser.last_name].filter(Boolean).join(' ');
+      }
+    }
+
+    lastRecipientPreview = data;
+    renderRecipientPreview(data);
+    return data;
+  } catch (e) {
+    if (seq !== recipientPreviewSeq) return null;
+    const fallback = { valid: true, status: 'lookup_unavailable', username: '@' + clean, displayName: '@' + clean };
+    lastRecipientPreview = fallback;
+    renderRecipientPreview(null);
+    return fallback;
+  }
+}
+
+function getInitials(name, username) {
+  const src = String(name || username || '?').replace(/^@+/, '').trim();
+  const parts = src.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return src.slice(0, 2).toUpperCase() || '?';
+}
+
+function renderRecipientPreview(data) {
+  const box = document.getElementById('recipientPreviewBox');
+  if (!box) return;
+
+  if (!data || data.status === 'lookup_unavailable') {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+
+  box.style.display = 'flex';
+  if (data.loading) {
+    box.className = 'recipient-preview-card state-loading';
+    box.innerHTML = `
+      <div class="recipient-avatar-fallback">...</div>
+      <div class="recipient-preview-info">
+        <div class="recipient-preview-name">Поиск ${escapeHtmlSafe(data.username)}...</div>
+        <div class="recipient-preview-sub">Проверяем аккаунт в Telegram</div>
+      </div>
+    `;
+    return;
+  }
+
+  const initials = escapeHtmlSafe(getInitials(data.displayName, data.username));
+  const avatarHtml = data.avatarUrl
+    ? `<div class="recipient-avatar-wrap">
+         <img src="${escapeHtmlSafe(data.avatarUrl)}" alt="" class="recipient-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+         <div class="recipient-avatar-fallback" style="display:none;">${initials}</div>
+       </div>`
+    : `<div class="recipient-avatar-fallback">${initials}</div>`;
+
+  if (data.valid) {
+    box.className = 'recipient-preview-card state-ok';
+    box.innerHTML = `
+      ${avatarHtml}
+      <div class="recipient-preview-info">
+        <div class="recipient-preview-name">${escapeHtmlSafe(data.displayName || data.username)}</div>
+        <div class="recipient-preview-sub">${escapeHtmlSafe(data.username)}</div>
+      </div>
+      <span class="status-badge-clean confirmed">Найден</span>
+    `;
+  } else {
+    box.className = 'recipient-preview-card state-warn';
+    box.innerHTML = `
+      ${avatarHtml}
+      <div class="recipient-preview-info">
+        <div class="recipient-preview-name">${escapeHtmlSafe(data.displayName || data.username)}</div>
+        <div class="recipient-preview-sub warn">${escapeHtmlSafe(data.reason || 'Проверьте @username')}</div>
+      </div>
+      <span class="status-badge-clean rejected">Ошибка</span>
+    `;
+  }
+}
+
+function validateRecipientForCheckout(recipient) {
+  if (!recipient) {
+    Helpers.haptic('error');
+    Helpers.showToast('Укажите @username получателя');
+    const input = document.getElementById('recipientInput');
+    if (input) input.focus();
+    return false;
+  }
+  if (recipient.length < 4) {
+    Helpers.haptic('error');
+    Helpers.showToast('Username должен содержать от 4 символов');
+    return false;
+  }
+  if (
+    lastRecipientPreview &&
+    lastRecipientPreview.username &&
+    lastRecipientPreview.username.toLowerCase() === ('@' + recipient.toLowerCase()) &&
+    lastRecipientPreview.valid === false
+  ) {
+    Helpers.haptic('error');
+    Helpers.showToast(lastRecipientPreview.reason || 'Укажите корректный личный @username');
+    const input = document.getElementById('recipientInput');
+    if (input) input.focus();
+    return false;
+  }
+  return true;
+}
+
 // ===== Чекаут =====
 
 async function startCheckoutFlow(type, amount, fallbackPrice, itemDesc, recipient) {
@@ -222,13 +384,7 @@ async function startCheckoutFlow(type, amount, fallbackPrice, itemDesc, recipien
 
 function openStarsCheckout() {
   const recipient = getRecipient();
-  if (!recipient) {
-    Helpers.haptic('error');
-    Helpers.showToast('Укажите @username получателя');
-    const input = document.getElementById('recipientInput');
-    if (input) input.focus();
-    return;
-  }
+  if (!validateRecipientForCheckout(recipient)) return;
 
   if (starsAmount < catalog.minStars) {
     Helpers.showToast(`Минимальный заказ: ${catalog.minStars} звёзд`);
@@ -241,13 +397,7 @@ function openStarsCheckout() {
 
 function openPremiumCheckout(months) {
   const recipient = getRecipient();
-  if (!recipient) {
-    Helpers.haptic('error');
-    Helpers.showToast('Укажите @username получателя');
-    const input = document.getElementById('recipientInput');
-    if (input) input.focus();
-    return;
-  }
+  if (!validateRecipientForCheckout(recipient)) return;
 
   let price = catalog.premium3Uzs;
   if (months === 6) price = catalog.premium6Uzs;
@@ -569,10 +719,12 @@ async function loadOrders() {
 
     container.innerHTML = orders.map(o => {
       const itemDesc = o.type === 'stars' ? `${o.amount} Stars` : `Premium ${o.amount} мес.`;
+      const safeRec = escapeHtmlSafe(o.recipient_username);
+      const safeType = escapeHtmlSafe(o.type);
       return `
         <div class="order-entry">
           <div class="order-top">
-            <span class="order-code">#${o.id}</span>
+            <span class="order-code">#${escapeHtmlSafe(o.id)}</span>
             ${Helpers.statusBadge(o.status)}
           </div>
           <div class="order-data-grid">
@@ -586,12 +738,28 @@ async function loadOrders() {
             </div>
             <div>
               <span class="order-field-label">Получатель</span>
-              <div class="order-field-val text-accent">${o.recipient_username}</div>
+              <div class="order-field-val text-accent">${safeRec}</div>
             </div>
             <div>
               <span class="order-field-label">Дата</span>
               <div class="order-field-val">${Helpers.formatDate(o.created_at)}</div>
             </div>
+          </div>
+          <div class="order-footer-row">
+            <button type="button"
+                    class="repeat-order-btn"
+                    data-type="${safeType}"
+                    data-amount="${Number(o.amount)}"
+                    data-recipient="${safeRec}"
+                    onclick="repeatOrderFromBtn(this)">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="17 1 21 5 17 9"></polyline>
+                <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                <polyline points="7 23 3 19 7 15"></polyline>
+                <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+              </svg>
+              <span>Повторить заказ</span>
+            </button>
           </div>
         </div>
       `;
@@ -607,6 +775,36 @@ async function loadOrders() {
   }
 }
 
+async function repeatOrderFromBtn(btn) {
+  if (!btn) return;
+  const type = btn.dataset.type || 'stars';
+  const amount = Number(btn.dataset.amount || 100);
+  const recipient = String(btn.dataset.recipient || '').replace(/^@+/, '').trim();
+  Helpers.haptic('medium');
+
+  const input = document.getElementById('recipientInput');
+  if (input && recipient) {
+    input.value = recipient;
+  }
+
+  if (type === 'stars') {
+    switchTab('stars');
+    setStars(amount);
+  } else {
+    switchTab('premium');
+  }
+
+  if (recipient) {
+    await fetchRecipientPreview(recipient);
+  }
+
+  if (type === 'stars') {
+    openStarsCheckout();
+  } else {
+    openPremiumCheckout(amount);
+  }
+}
+
 
 // ===== Панель управления (Admin) =====
 
@@ -618,7 +816,7 @@ async function loadAdminInfo() {
 
   try {
     const data = await API.getAdminInfo();
-    const { settings, stats, pendingOrders } = data;
+    const { settings, stats, pendingOrders, profitStats, broadcastStats, walletBalance } = data;
 
     // Метрики
     const totalEl = document.getElementById('adminMetricTotal');
@@ -629,6 +827,17 @@ async function loadAdminInfo() {
     if (pendEl) pendEl.textContent = stats.pending || 0;
     if (revEl) revEl.textContent = Helpers.formatUzs(stats.revenue || 0);
 
+    // Баланс TON и порог
+    cachedLowTonThreshold = Number(settings.low_ton_threshold || 5);
+    renderAdminTonBalance(walletBalance, cachedLowTonThreshold);
+
+    // Статистика прибыли
+    cachedProfitStats = profitStats || null;
+    renderProfitStats();
+
+    // База для рассылки
+    renderBroadcastAudience(broadcastStats);
+
     // Поля настроек
     const sStar = document.getElementById('settingStarPrice');
     const sPrem3 = document.getElementById('settingPrem3');
@@ -636,6 +845,11 @@ async function loadAdminInfo() {
     const sPrem12 = document.getElementById('settingPrem12');
     const sCard = document.getElementById('settingCardNumber');
     const sGroup = document.getElementById('settingOrdersGroup');
+    const sCostStar = document.getElementById('settingCostStar');
+    const sCostPrem3 = document.getElementById('settingCostPrem3');
+    const sCostPrem6 = document.getElementById('settingCostPrem6');
+    const sCostPrem12 = document.getElementById('settingCostPrem12');
+    const sLowTon = document.getElementById('settingLowTonThreshold');
 
     if (sStar) sStar.value = settings.star_price_uzs || 220;
     if (sPrem3) sPrem3.value = settings.premium_3_uzs || 175000;
@@ -643,6 +857,11 @@ async function loadAdminInfo() {
     if (sPrem12) sPrem12.value = settings.premium_12_uzs || 395000;
     if (sCard) sCard.value = settings.card_number || '5614681816265841';
     if (sGroup) sGroup.value = settings.orders_chat_id || '';
+    if (sCostStar) sCostStar.value = settings.cost_star_uzs || 195;
+    if (sCostPrem3) sCostPrem3.value = settings.cost_prem_3_uzs || 155000;
+    if (sCostPrem6) sCostPrem6.value = settings.cost_prem_6_uzs || 207000;
+    if (sCostPrem12) sCostPrem12.value = settings.cost_prem_12_uzs || 370000;
+    if (sLowTon) sLowTon.value = settings.low_ton_threshold || 5;
 
     // Настройки Fragment
     const fragConfig = data.fragmentConfig || {};
@@ -1125,6 +1344,11 @@ async function saveAdminSettings() {
   const fragmentMnemonics = document.getElementById('settingFragmentMnemonics')?.value;
   const fragmentApiKey = document.getElementById('settingFragmentApiKey')?.value;
   const autoConfirmEnabled = document.getElementById('settingAutoConfirmEnabled')?.value === 'true';
+  const lowTonThreshold = document.getElementById('settingLowTonThreshold')?.value;
+  const costStarUzs = document.getElementById('settingCostStar')?.value;
+  const costPrem3Uzs = document.getElementById('settingCostPrem3')?.value;
+  const costPrem6Uzs = document.getElementById('settingCostPrem6')?.value;
+  const costPrem12Uzs = document.getElementById('settingCostPrem12')?.value;
 
   try {
     const res = await API.updateAdminSettings({
@@ -1138,14 +1362,20 @@ async function saveAdminSettings() {
       fragmentPhone,
       fragmentMnemonics,
       fragmentApiKey,
-      autoConfirmEnabled
+      autoConfirmEnabled,
+      lowTonThreshold,
+      costStarUzs,
+      costPrem3Uzs,
+      costPrem6Uzs,
+      costPrem12Uzs
     });
 
     Helpers.haptic('success');
     Helpers.showToast('Настройки успешно сохранены');
 
-    // Обновляем локальный каталог
+    // Обновляем локальный каталог и пересчитываем прибыль в админке
     await loadCatalog();
+    loadAdminInfo();
   } catch (err) {
     Helpers.haptic('error');
     Helpers.showToast(err.message || 'Ошибка сохранения');
@@ -1226,5 +1456,203 @@ async function handleAdminOrder(orderId, action) {
   } catch (err) {
     Helpers.haptic('error');
     Helpers.showToast(err.message || 'Ошибка выполнения действия');
+  }
+}
+
+// ===== Баланс TON, статистика прибыли и рассылка (Admin) =====
+
+function renderAdminTonBalance(wallet, threshold) {
+  const valEl = document.getElementById('adminTonBalanceVal');
+  const badgeEl = document.getElementById('adminTonStatusBadge');
+  const hintEl = document.getElementById('adminTonAddressHint');
+  const thr = Number(threshold || cachedLowTonThreshold || 5);
+
+  if (hintEl) {
+    const addr = wallet?.address ? ` · ${wallet.address.slice(0, 8)}...${wallet.address.slice(-6)}` : '';
+    hintEl.textContent = `Порог уведомления: ${thr} TON${addr}`;
+  }
+  if (!valEl || !badgeEl) return;
+
+  if (!wallet || !wallet.success) {
+    valEl.textContent = '— TON';
+    badgeEl.textContent = wallet?.error ? 'Ошибка сети' : 'Неизвестно';
+    badgeEl.className = 'status-badge-clean pending';
+    return;
+  }
+
+  valEl.textContent = wallet.balanceFormatted || `${Number(wallet.balance || 0).toFixed(3)} TON`;
+  if (wallet.balance < 1) {
+    badgeEl.textContent = 'Критично (< 1 TON)';
+    badgeEl.className = 'status-badge-clean rejected';
+  } else if (wallet.balance < thr) {
+    badgeEl.textContent = `Низкий (< ${thr} TON)`;
+    badgeEl.className = 'status-badge-clean pending';
+  } else {
+    badgeEl.textContent = 'В норме';
+    badgeEl.className = 'status-badge-clean confirmed';
+  }
+}
+
+async function refreshAdminTonBalance() {
+  Helpers.haptic('light');
+  try {
+    const res = await API.getAdminTonBalance();
+    renderAdminTonBalance(res, res.threshold);
+    Helpers.showToast('Баланс TON обновлён');
+  } catch (err) {
+    Helpers.showToast(err.message || 'Не удалось обновить баланс TON');
+  }
+}
+
+function switchProfitPeriod(period) {
+  Helpers.haptic('light');
+  selectedProfitPeriod = period;
+  document.querySelectorAll('.period-pill').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.period === period);
+  });
+  renderProfitStats();
+}
+
+function renderProfitStats() {
+  const stats = cachedProfitStats?.[selectedProfitPeriod];
+  if (!stats) return;
+
+  const netEl = document.getElementById('profitNetVal');
+  const revEl = document.getElementById('profitRevVal');
+  const costEl = document.getElementById('profitCostVal');
+  const salesEl = document.getElementById('profitSalesVal');
+  const marginEl = document.getElementById('profitMarginBadge');
+  const hintEl = document.getElementById('profitDetailHint');
+
+  if (netEl) {
+    const sign = stats.profitUzs > 0 ? '+' : '';
+    netEl.textContent = `${sign}${Helpers.formatUzs(stats.profitUzs)}`;
+    netEl.className = `profit-val ${stats.profitUzs >= 0 ? 'profit-ok' : 'profit-neg'}`;
+  }
+  if (revEl) revEl.textContent = Helpers.formatUzs(stats.revenueUzs);
+  if (costEl) costEl.textContent = Helpers.formatUzs(stats.costUzs);
+  if (salesEl) {
+    salesEl.textContent = `${stats.orders} зак. (${stats.starsCount.toLocaleString('ru-RU')} ★ · Prem: ${stats.premiumCount})`;
+  }
+  if (marginEl) {
+    marginEl.textContent = `Маржа ${stats.marginPct}%`;
+    marginEl.className = `status-badge-clean ${stats.profitUzs >= 0 ? 'confirmed' : 'rejected'}`;
+  }
+  if (hintEl) {
+    const tonNote = stats.tonSpent > 0 ? ` · Потрачено TON: ${stats.tonSpent}` : '';
+    hintEl.textContent = `Оплачено: ${stats.confirmedOrders} выполн. / ${stats.processingOrders} в обработке${tonNote}`;
+  }
+}
+
+function renderBroadcastAudience(bStats) {
+  const badge = document.getElementById('broadcastAudienceBadge');
+  if (!badge || !bStats) return;
+  badge.textContent = `В базе: ${bStats.active} акт. / ${bStats.total}`;
+}
+
+async function sendBroadcastTest() {
+  const textEl = document.getElementById('broadcastTextInput');
+  const includeBtnEl = document.getElementById('broadcastIncludeBtn');
+  const btn = document.getElementById('broadcastTestBtn');
+  const text = (textEl?.value || '').trim();
+  if (!text) {
+    Helpers.haptic('error');
+    Helpers.showToast('Введите текст сообщения');
+    return;
+  }
+
+  Helpers.haptic('light');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span>Отправка...</span>'; }
+  try {
+    await API.sendBroadcastTest(text, Boolean(includeBtnEl?.checked));
+    Helpers.haptic('success');
+    Helpers.showToast('Тестовое сообщение отправлено вам в чат бота');
+  } catch (err) {
+    Helpers.haptic('error');
+    Helpers.showToast(err.message || 'Ошибка отправки теста');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<span>Тест мне</span>'; }
+  }
+}
+
+function restoreBroadcastButtons() {
+  const row = document.getElementById('broadcastActionRow');
+  if (!row) return;
+  row.innerHTML = `
+    <button type="button" class="cta-secondary-btn" style="flex:1; padding:11px; font-size:0.78rem;" id="broadcastTestBtn" onclick="sendBroadcastTest()">
+      <span>Тест мне</span>
+    </button>
+    <button type="button" class="cta-primary-btn" style="flex:1.4; padding:11px; font-size:0.78rem;" id="broadcastSendBtn" onclick="promptAdminBroadcast()">
+      <span>Отправить всем</span>
+    </button>
+  `;
+}
+
+function promptAdminBroadcast() {
+  const textEl = document.getElementById('broadcastTextInput');
+  const text = (textEl?.value || '').trim();
+  if (!text) {
+    Helpers.haptic('error');
+    Helpers.showToast('Введите текст для рассылки');
+    return;
+  }
+
+  Helpers.haptic('warning');
+  const msg = 'Отправить это сообщение всем пользователям бота? Действие нельзя отменить.';
+  if (tg && typeof tg.showConfirm === 'function') {
+    tg.showConfirm(msg, (confirmed) => {
+      if (confirmed) executeAdminBroadcast();
+    });
+  } else {
+    const row = document.getElementById('broadcastActionRow');
+    if (row) {
+      row.innerHTML = `
+        <button type="button" class="action-btn-confirm" style="font-weight:700;" onclick="executeAdminBroadcast()">
+          📣 Да, разослать всем
+        </button>
+        <button type="button" class="action-btn-reject" style="background:#1e293b; color:#94a3b8;" onclick="restoreBroadcastButtons()">
+          Отмена
+        </button>
+      `;
+    }
+  }
+}
+
+async function executeAdminBroadcast() {
+  const textEl = document.getElementById('broadcastTextInput');
+  const includeBtnEl = document.getElementById('broadcastIncludeBtn');
+  const resBox = document.getElementById('broadcastResultBox');
+  const row = document.getElementById('broadcastActionRow');
+  const text = (textEl?.value || '').trim();
+  if (!text) return restoreBroadcastButtons();
+
+  if (row) {
+    row.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  }
+  if (resBox) {
+    resBox.style.display = 'block';
+    resBox.textContent = '⏳ Идёт рассылка по базе пользователей...';
+  }
+
+  try {
+    const res = await API.sendBroadcast(text, Boolean(includeBtnEl?.checked));
+    Helpers.haptic('success');
+    Helpers.showToast(`Рассылка завершена: доставлено ${res.sent} из ${res.total}`);
+    if (res.broadcastStats) renderBroadcastAudience(res.broadcastStats);
+    if (resBox) {
+      resBox.style.display = 'block';
+      resBox.style.color = 'var(--ok)';
+      resBox.textContent = `✅ Доставлено: ${res.sent} из ${res.total} (заблок.: ${res.blocked}, ошибок: ${res.failed})`;
+    }
+  } catch (err) {
+    Helpers.haptic('error');
+    Helpers.showToast(err.message || 'Ошибка рассылки');
+    if (resBox) {
+      resBox.style.display = 'block';
+      resBox.style.color = 'var(--error)';
+      resBox.textContent = `❌ ${err.message || 'Ошибка рассылки'}`;
+    }
+  } finally {
+    restoreBroadcastButtons();
   }
 }

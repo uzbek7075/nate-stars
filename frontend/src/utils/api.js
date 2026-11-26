@@ -49,6 +49,11 @@ const API = (() => {
       return request('/api/user');
     },
 
+    // Предпросмотр получателя по @username
+    getRecipientPreview(username) {
+      return request(`/api/recipient-preview?username=${encodeURIComponent(username)}`);
+    },
+
     // Подготовить заказ (зарезервировать точную сумму с «копейками»)
     prepareOrder(orderData) {
       return request('/api/orders/prepare', {
@@ -159,6 +164,24 @@ const API = (() => {
     cardXabarDisconnect() {
       return request('/api/admin/cardxabar/disconnect', {
         method: 'POST'
+      });
+    },
+
+    getAdminTonBalance() {
+      return request('/api/admin/ton-balance');
+    },
+
+    sendBroadcastTest(text, includeOpenButton = true) {
+      return request('/api/admin/broadcast/test', {
+        method: 'POST',
+        body: JSON.stringify({ text, includeOpenButton })
+      });
+    },
+
+    sendBroadcast(text, includeOpenButton = true) {
+      return request('/api/admin/broadcast/send', {
+        method: 'POST',
+        body: JSON.stringify({ text, includeOpenButton })
       });
     }
   };

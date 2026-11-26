@@ -1663,3 +1663,214 @@ html, body {
 .active-banner-desc strong {
   color: var(--text-hi);
 }
+
+/* Recipient Live Preview Card */
+.recipient-preview-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 9px 12px;
+  background: var(--surface-card);
+  border: var(--hairline);
+  border-radius: var(--r-md);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.recipient-preview-card.state-ok {
+  border-color: rgba(16, 185, 129, 0.36);
+}
+
+.recipient-preview-card.state-warn {
+  border-color: rgba(244, 63, 94, 0.42);
+  background: rgba(244, 63, 94, 0.06);
+}
+
+.recipient-avatar-wrap {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  border: var(--hairline-strong);
+  background: var(--bg-input);
+}
+
+.recipient-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.recipient-avatar-fallback {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2563EB 0%, #1E3A8A 100%);
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  color: #fff;
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.recipient-preview-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.recipient-preview-name {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--text-hi);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recipient-preview-sub {
+  font-size: 0.72rem;
+  color: var(--blue-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recipient-preview-sub.warn {
+  color: var(--error);
+}
+
+/* Repeat Order Button in History */
+.order-footer-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 8px;
+  margin-top: 2px;
+  border-top: var(--hairline);
+}
+
+.repeat-order-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(37, 99, 235, 0.16);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: var(--blue-bright);
+  font-family: var(--font-text);
+  font-size: 0.74rem;
+  font-weight: 700;
+  padding: 7px 12px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease);
+}
+
+.repeat-order-btn:hover {
+  background: rgba(37, 99, 235, 0.28);
+  color: #fff;
+}
+
+.repeat-order-btn:active {
+  transform: scale(0.96);
+}
+
+/* Admin TON Balance & Profit Analytics & Broadcast */
+.ton-balance-card,
+.profit-card {
+  margin-bottom: 14px;
+}
+
+.period-pills {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.period-pill {
+  padding: 7px 4px;
+  border-radius: var(--r-sm);
+  border: var(--hairline);
+  background: var(--bg-sunken);
+  color: var(--text-mute);
+  font-family: var(--font-text);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--dur-fast);
+}
+
+.period-pill.active {
+  background: var(--cta-gradient);
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #fff;
+}
+
+.profit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.profit-box {
+  background: var(--bg-sunken);
+  border: var(--hairline);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.profit-val {
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-hi);
+  word-break: break-word;
+}
+
+.profit-val.profit-ok {
+  color: var(--ok);
+}
+
+.profit-val.profit-neg {
+  color: var(--error);
+}
+
+.profit-val.muted {
+  color: var(--text-mute);
+}
+
+.admin-divider-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--blue-bright);
+  margin: 14px 0 10px;
+  padding-top: 12px;
+  border-top: var(--hairline);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: var(--text-mute);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox-row input[type="checkbox"] {
+  accent-color: var(--blue-hi);
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}

@@ -24,9 +24,27 @@ async function initDatabase() {
       username TEXT,
       first_name TEXT,
       last_name TEXT,
+      is_blocked INTEGER DEFAULT 0,
+      last_seen_at TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now'))
     )
   `);
+
+  // Безопасная миграция колонок таблицы users
+  try {
+    const uStmt = db.prepare("PRAGMA table_info(users)");
+    const userCols = [];
+    while (uStmt.step()) userCols.push(uStmt.getAsObject().name);
+    uStmt.free();
+    if (!userCols.includes('is_blocked')) {
+      db.run("ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0");
+    }
+    if (!userCols.includes('last_seen_at')) {
+      db.run("ALTER TABLE users ADD COLUMN last_seen_at TEXT DEFAULT ''");
+    }
+  } catch (e) {
+    console.warn('Миграция users:', e.message);
+  }
 
   // Таблица настроек и цен
   db.run(`
@@ -69,6 +87,8 @@ async function initDatabase() {
       status TEXT DEFAULT 'pending',
       sender_comment TEXT,
       payment_source TEXT DEFAULT 'manual',
+      cost_uzs INTEGER DEFAULT 0,
+      ton_spent REAL DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     )
@@ -85,6 +105,12 @@ async function initDatabase() {
     }
     if (!orderCols.includes('payment_source')) {
       db.run("ALTER TABLE orders ADD COLUMN payment_source TEXT DEFAULT 'manual'");
+    }
+    if (!orderCols.includes('cost_uzs')) {
+      db.run("ALTER TABLE orders ADD COLUMN cost_uzs INTEGER DEFAULT 0");
+    }
+    if (!orderCols.includes('ton_spent')) {
+      db.run("ALTER TABLE orders ADD COLUMN ton_spent REAL DEFAULT 0");
     }
   } catch (e) {
     console.warn('Миграция orders:', e.message);
@@ -122,7 +148,14 @@ async function initDatabase() {
     'tg_api_id': '',
     'tg_api_hash': '',
     'tg_session_string': '',
-    'tg_phone': ''
+    'tg_phone': '',
+    'low_ton_threshold': '5',
+    'last_low_ton_alert_at': '0',
+    'last_low_ton_alert_balance': '',
+    'cost_star_uzs': '195',
+    'cost_prem_3_uzs': '155000',
+    'cost_prem_6_uzs': '207000',
+    'cost_prem_12_uzs': '370000'
   };
 
   for (const [key, val] of Object.entries(defaultSettings)) {
@@ -188,6 +221,23 @@ function runSql(sql, params = []) {
   saveDb();
 }
 
+function parseCreatedMs(dateStr) {
+  if (!dateStr) return NaN;
+  const s = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z';
+  return Date.parse(s);
+}
+
+function calculateCostUzs(type, amount, settings) {
+  const numAmount = Number(amount || 0);
+  if (type === 'stars') {
+    return Math.round(numAmount * Number(settings?.cost_star_uzs || 195));
+  }
+  if (numAmount === 3) return Number(settings?.cost_prem_3_uzs || 155000);
+  if (numAmount === 6) return Number(settings?.cost_prem_6_uzs || 207000);
+  if (numAmount === 12) return Number(settings?.cost_prem_12_uzs || 370000);
+  return 0;
+}
+
 const dao = {
   getSetting(key) {
     const row = queryOne('SELECT value FROM settings WHERE key = ?', [key]);
@@ -209,25 +259,48 @@ const dao = {
   },
 
   upsertUser({ telegramId, username, firstName, lastName }) {
+    const nowIso = new Date().toISOString();
     runSql(`
-      INSERT INTO users (telegram_id, username, first_name, last_name)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO users (telegram_id, username, first_name, last_name, is_blocked, last_seen_at)
+      VALUES (?, ?, ?, ?, 0, ?)
       ON CONFLICT(telegram_id) DO UPDATE SET
         username = excluded.username,
         first_name = excluded.first_name,
-        last_name = excluded.last_name
-    `, [telegramId, username || '', firstName || '', lastName || '']);
+        last_name = excluded.last_name,
+        is_blocked = 0,
+        last_seen_at = excluded.last_seen_at
+    `, [telegramId, username || '', firstName || '', lastName || '', nowIso]);
+  },
+
+  markUserBlocked(telegramId, blocked = true) {
+    runSql('UPDATE users SET is_blocked = ? WHERE telegram_id = ?', [blocked ? 1 : 0, Number(telegramId)]);
+  },
+
+  getBroadcastStats() {
+    const totalRow = queryOne('SELECT COUNT(*) as count FROM users') || { count: 0 };
+    const activeRow = queryOne('SELECT COUNT(*) as count FROM users WHERE COALESCE(is_blocked, 0) = 0') || { count: 0 };
+    const total = Number(totalRow.count || 0);
+    const active = Number(activeRow.count || 0);
+    return {
+      total,
+      active,
+      blocked: Math.max(0, total - active)
+    };
+  },
+
+  getActiveUsersForBroadcast() {
+    return queryAll('SELECT telegram_id, username, first_name FROM users WHERE COALESCE(is_blocked, 0) = 0 ORDER BY id DESC');
   },
 
   getUser(telegramId) {
     return queryOne('SELECT * FROM users WHERE telegram_id = ?', [telegramId]);
   },
 
-  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, basePriceUzs, cardNumber, status, senderComment, paymentSource }) {
+  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, basePriceUzs, costUzs, cardNumber, status, senderComment, paymentSource }) {
     const nowIso = new Date().toISOString();
     runSql(`
-      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, base_price_uzs, card_number, status, sender_comment, payment_source, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, base_price_uzs, cost_uzs, card_number, status, sender_comment, payment_source, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       id,
       telegramId,
@@ -237,6 +310,7 @@ const dao = {
       amount,
       priceUzs,
       basePriceUzs || priceUzs,
+      Number(costUzs || 0),
       cardNumber,
       status || 'pending',
       senderComment || '',
@@ -261,6 +335,17 @@ const dao = {
         UPDATE orders SET status = ?, updated_at = ? WHERE id = ?
       `, [status, nowIso, id]);
     }
+  },
+
+  updateOrderDeliveryCost(id, { costUzs, tonSpent = 0 } = {}) {
+    const nowIso = new Date().toISOString();
+    runSql(`
+      UPDATE orders
+      SET cost_uzs = CASE WHEN ? > 0 THEN ? ELSE cost_uzs END,
+          ton_spent = CASE WHEN ? > 0 THEN ? ELSE ton_spent END,
+          updated_at = ?
+      WHERE id = ?
+    `, [Number(costUzs || 0), Number(costUzs || 0), Number(tonSpent || 0), Number(tonSpent || 0), nowIso, id]);
   },
 
   markOrderPaidByUser(id, senderComment) {
@@ -306,7 +391,7 @@ const dao = {
 
     const usedPrices = new Set();
     for (const o of activeOrders) {
-      const ts = Date.parse(o.created_at.includes('T') ? o.created_at : o.created_at.replace(' ', 'T') + 'Z');
+      const ts = parseCreatedMs(o.created_at);
       if (!isNaN(ts) && ts >= Date.parse(cutoffIso)) {
         usedPrices.add(Number(o.price_uzs));
       }
@@ -341,8 +426,7 @@ const dao = {
 
     const target = Number(receivedAmount);
     for (const o of candidates) {
-      const createdStr = o.created_at.includes('T') ? o.created_at : o.created_at.replace(' ', 'T') + 'Z';
-      const createdMs = Date.parse(createdStr);
+      const createdMs = parseCreatedMs(o.created_at);
       if (isNaN(createdMs) || createdMs < cutoffMs) continue;
       // Платёж должен поступить не раньше создания заказа (допуск 2 минуты на рассинхрон часов)
       if (msgDateMs && createdMs > msgDateMs + 120 * 1000) continue;
@@ -376,8 +460,7 @@ const dao = {
     const cutoffMs = Date.now() - 30 * 60 * 1000;
     return rows.filter(o => {
       if (o.status !== 'awaiting_payment') return true;
-      const createdStr = o.created_at.includes('T') ? o.created_at : o.created_at.replace(' ', 'T') + 'Z';
-      return Date.parse(createdStr) >= cutoffMs;
+      return parseCreatedMs(o.created_at) >= cutoffMs;
     }).slice(0, limit);
   },
 
@@ -411,7 +494,75 @@ const dao = {
       confirmed: confirmedOrders.count,
       revenue: confirmedOrders.total
     };
+  },
+
+  getProfitStats(settings = null) {
+    const cfg = settings || this.getAllSettings();
+    const paidOrders = queryAll(`
+      SELECT type, amount, price_uzs, cost_uzs, ton_spent, status, created_at
+      FROM orders
+      WHERE status IN ('confirmed', 'paid_processing')
+    `);
+
+    const TZ_OFFSET_MS = 5 * 60 * 60 * 1000; // Asia/Tashkent UTC+5
+    const nowShifted = Date.now() + TZ_OFFSET_MS;
+    const d = new Date(nowShifted);
+    const todayStartMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - TZ_OFFSET_MS;
+    const weekStartMs = todayStartMs - 6 * 86400000;
+    const monthStartMs = todayStartMs - 29 * 86400000;
+
+    const makeBucket = () => ({
+      orders: 0,
+      confirmedOrders: 0,
+      processingOrders: 0,
+      starsCount: 0,
+      premiumCount: 0,
+      revenueUzs: 0,
+      costUzs: 0,
+      profitUzs: 0,
+      marginPct: 0,
+      tonSpent: 0
+    });
+
+    const buckets = {
+      today: makeBucket(),
+      week: makeBucket(),
+      month: makeBucket(),
+      all: makeBucket()
+    };
+
+    const addToBucket = (b, order, estCost) => {
+      b.orders += 1;
+      if (order.status === 'confirmed') b.confirmedOrders += 1;
+      else b.processingOrders += 1;
+      if (order.type === 'stars') b.starsCount += Number(order.amount || 0);
+      else b.premiumCount += 1;
+      b.revenueUzs += Number(order.price_uzs || 0);
+      b.costUzs += estCost;
+      b.tonSpent += Number(order.ton_spent || 0);
+    };
+
+    for (const o of paidOrders) {
+      const savedCost = Number(o.cost_uzs || 0);
+      const estCost = savedCost > 0 ? savedCost : calculateCostUzs(o.type, o.amount, cfg);
+      const ts = parseCreatedMs(o.created_at);
+
+      addToBucket(buckets.all, o, estCost);
+      if (!isNaN(ts)) {
+        if (ts >= monthStartMs) addToBucket(buckets.month, o, estCost);
+        if (ts >= weekStartMs) addToBucket(buckets.week, o, estCost);
+        if (ts >= todayStartMs) addToBucket(buckets.today, o, estCost);
+      }
+    }
+
+    for (const b of Object.values(buckets)) {
+      b.profitUzs = b.revenueUzs - b.costUzs;
+      b.marginPct = b.revenueUzs > 0 ? Math.round((b.profitUzs / b.revenueUzs) * 1000) / 10 : 0;
+      b.tonSpent = Math.round(b.tonSpent * 10000) / 10000;
+    }
+
+    return buckets;
   }
 };
 
-module.exports = { initDatabase, dao };
+module.exports = { initDatabase, dao, calculateCostUzs };
