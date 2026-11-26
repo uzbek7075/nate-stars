@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Unbounded:wght@400;600;700;800;900&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="src/styles/main.css?v=15">
+  <link rel="stylesheet" href="src/styles/main.css?v=16">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     if (window.Telegram && window.Telegram.WebApp) {
@@ -67,7 +67,7 @@
     <div id="activeOrderBanner" class="active-order-banner" style="display:none;" onclick="switchTab('orders')"></div>
 
     <!-- Recipient username section -->
-    <section class="recipient-section">
+    <section class="recipient-section" id="recipientSection">
       <div class="section-title-row">
         <span class="field-label">Получатель</span>
         <span class="field-sublabel">Куда доставить покупку</span>
@@ -110,6 +110,14 @@
           <path d="M2 9h20"></path>
         </svg>
         <span>Premium</span>
+      </button>
+
+      <button class="segment-btn" role="tab" data-tab="ton" onclick="switchTab('ton')">
+        <svg class="tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20L4 6.5A2 2 0 0 1 5.7 3.5h12.6A2 2 0 0 1 20 6.5L12 20z"></path>
+          <line x1="12" y1="3.5" x2="12" y2="20"></line>
+        </svg>
+        <span>TON</span>
       </button>
 
       <button class="segment-btn" role="tab" data-tab="orders" onclick="switchTab('orders')">
@@ -296,6 +304,100 @@
         </div>
       </section>
 
+      <!-- PANEL 2.5: BUY TON -->
+      <section class="tab-panel" id="tab-ton">
+        <div class="glass-card main-calc-card">
+          <div class="card-head">
+            <span class="card-title">Покупка Toncoin (TON)</span>
+            <div class="rate-pill" id="tonRateBadge">1 TON = 20 000 сум</div>
+          </div>
+
+          <div class="counter-container">
+            <button class="step-btn" onclick="adjustTon(-0.5)" aria-label="Меньше">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+
+            <div class="amount-field">
+              <input
+                type="number"
+                id="tonAmountInput"
+                class="amount-input"
+                value="1"
+                min="0.5"
+                step="0.5"
+                oninput="onTonInputChange()"
+              >
+              <span class="currency-symbol" style="font-size:0.9rem;">TON</span>
+            </div>
+
+            <button class="step-btn" onclick="adjustTon(0.5)" aria-label="Больше">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+          </div>
+
+          <div class="presets-row">
+            <button class="ton-preset-pill" onclick="setTon(0.5)">0.5</button>
+            <button class="ton-preset-pill active" onclick="setTon(1)">1</button>
+            <button class="ton-preset-pill" onclick="setTon(2)">2</button>
+            <button class="ton-preset-pill" onclick="setTon(5)">5</button>
+            <button class="ton-preset-pill" onclick="setTon(10)">10</button>
+            <button class="ton-preset-pill" onclick="setTon(25)">25</button>
+          </div>
+
+          <div class="form-group" style="margin-top:12px;">
+            <label class="form-label" for="tonAddressInput">Адрес вашего TON-кошелька</label>
+            <input
+              type="text"
+              id="tonAddressInput"
+              class="form-control"
+              style="font-family:var(--font-mono); font-size:0.8rem;"
+              placeholder="UQ... или EQ... (Tonkeeper / @wallet)"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+            >
+            <div id="tonAddressStatusBox" class="field-help" style="display:none; margin-top:6px;"></div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="tonMemoInput">Memo / Комментарий (необязательно)</label>
+            <input
+              type="text"
+              id="tonMemoInput"
+              class="form-control"
+              placeholder="Указывайте только если переводите на биржу"
+              autocomplete="off"
+            >
+          </div>
+
+          <div class="cost-summary">
+            <div class="cost-line">
+              <span class="cost-label">Итого к оплате</span>
+              <span class="cost-value" id="tonPriceText">20 000 сум</span>
+            </div>
+            <div class="benefit-badge">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              </svg>
+              <span>Прямая автоотправка в блокчейне TON за 5–10 секунд</span>
+            </div>
+          </div>
+
+          <button class="cta-primary-btn" onclick="openTonCheckout()">
+            <span>Купить TON</span>
+            <svg class="cta-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+          </button>
+        </div>
+      </section>
+
       <!-- PANEL 3: ORDERS -->
       <section class="tab-panel" id="tab-orders">
         <div class="orders-header-row">
@@ -424,6 +526,17 @@
 
           <div class="admin-fields-row">
             <div class="form-group">
+              <label class="form-label" for="settingTonPrice">Цена за 1 TON (сум)</label>
+              <input type="number" id="settingTonPrice" class="form-control" placeholder="20000">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="settingMinTon">Мин. покупка TON</label>
+              <input type="number" step="0.1" id="settingMinTon" class="form-control" placeholder="0.5">
+            </div>
+          </div>
+
+          <div class="admin-fields-row">
+            <div class="form-group">
               <label class="form-label" for="settingPrem3">Premium 3м (сум)</label>
               <input type="number" id="settingPrem3" class="form-control" placeholder="175000">
             </div>
@@ -476,6 +589,11 @@
           <div class="form-group">
             <label class="form-label" for="settingCostPrem12">Себест. Premium 12м (сум)</label>
             <input type="number" id="settingCostPrem12" class="form-control" placeholder="370000">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="settingCostTon">Себестоимость 1 TON (сум)</label>
+            <input type="number" id="settingCostTon" class="form-control" placeholder="18500">
           </div>
 
           <button class="cta-primary-btn" id="saveSettingsBtn" onclick="saveAdminSettings()">
@@ -798,8 +916,8 @@
 
   <div class="toast-notification" id="toast"></div>
 
-  <script src="src/utils/api.js?v=15"></script>
-  <script src="src/utils/helpers.js?v=15"></script>
-  <script src="src/app.js?v=15"></script>
+  <script src="src/utils/api.js?v=16"></script>
+  <script src="src/utils/helpers.js?v=16"></script>
+  <script src="src/app.js?v=16"></script>
 </body>
 </html>

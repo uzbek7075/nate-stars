@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const { initDatabase, dao, calculateCostUzs } = require('./database');
 const { authMiddleware } = require('./auth');
 const { FragmentService } = require('./fragment');
+const { TonTransferService, parseAndValidateAddress, formatTonAmount } = require('./ton');
 const { CardXabarService } = require('./cardxabar');
 
 // ===== Конфигурация =====
@@ -73,6 +74,12 @@ function requireAdmin(req, res, next) {
 
 // ===== Вспомогательные функции заказов и автовыдачи =====
 
+function formatOrderItemDesc(type, amount) {
+  if (type === 'stars') return `${amount} Telegram Stars`;
+  if (type === 'ton') return `${formatTonAmount(amount)} TON`;
+  return `Telegram Premium на ${amount} мес.`;
+}
+
 function calculateBasePrice(type, amount, settings) {
   if (type === 'stars') {
     const starsCount = Number(amount);
@@ -83,7 +90,26 @@ function calculateBasePrice(type, amount, settings) {
     const starPrice = Number(settings.star_price_uzs || 220);
     return {
       basePriceUzs: starsCount * starPrice,
-      itemDescription: `${starsCount} Telegram Stars`
+      normalizedAmount: starsCount,
+      itemDescription: formatOrderItemDesc('stars', starsCount)
+    };
+  }
+  if (type === 'ton') {
+    const rawNum = parseFloat(String(amount).replace(',', '.'));
+    const tonAmount = Math.round(rawNum * 100) / 100;
+    const minTon = Number(settings.min_ton || 0.5);
+    const maxTon = Number(settings.max_ton || 50);
+    if (!Number.isFinite(tonAmount) || tonAmount < minTon) {
+      throw new Error(`Минимум ${minTon} TON`);
+    }
+    if (tonAmount > maxTon) {
+      throw new Error(`Максимум ${maxTon} TON за один заказ`);
+    }
+    const tonPrice = Number(settings.ton_price_uzs || 20000);
+    return {
+      basePriceUzs: Math.round(tonAmount * tonPrice),
+      normalizedAmount: tonAmount,
+      itemDescription: formatOrderItemDesc('ton', tonAmount)
     };
   }
   if (type === 'premium') {
@@ -95,7 +121,8 @@ function calculateBasePrice(type, amount, settings) {
     else throw new Error('Некорректный срок Premium');
     return {
       basePriceUzs: price,
-      itemDescription: `Telegram Premium на ${months} мес.`
+      normalizedAmount: months,
+      itemDescription: formatOrderItemDesc('premium', months)
     };
   }
   throw new Error('Неизвестный тип товара');
@@ -129,14 +156,15 @@ async function sendToAdminAndGroup(htmlMessage, extraOptions = {}) {
 }
 
 async function notifyAdminsOfPendingOrder(order) {
-  const itemDesc = order.type === 'stars'
-    ? `${order.amount} Telegram Stars`
-    : `Telegram Premium на ${order.amount} мес.`;
+  const itemDesc = formatOrderItemDesc(order.type, order.amount);
+  const memoLine = order.ton_memo ? `• <b>Memo / Tag:</b> <code>${escapeHtml(order.ton_memo)}</code>\n` : '';
+  const recLabel = order.type === 'ton' ? 'Кошелёк' : 'Получатель';
 
   const adminMessage =
     `<b>НОВЫЙ ЗАКАЗ #${escapeHtml(order.id)}</b>\n\n` +
     `• <b>Покупатель:</b> ${escapeHtml(order.buyer_username)} (ID: <code>${order.telegram_id}</code>)\n` +
-    `• <b>Получатель:</b> ${escapeHtml(order.recipient_username)}\n` +
+    `• <b>${recLabel}:</b> <code>${escapeHtml(order.recipient_username)}</code>\n` +
+    memoLine +
     `• <b>Товар:</b> ${escapeHtml(itemDesc)}\n` +
     `• <b>Сумма:</b> <code>${formatUzs(order.price_uzs)}</code>\n` +
     `• <b>Карта оплаты:</b> <code>${escapeHtml(order.card_number)}</code>\n` +
@@ -155,27 +183,34 @@ async function notifyAdminsOfPendingOrder(order) {
   });
 }
 
-async function sendDeliveredClientMessage(order) {
-  const itemDesc = order.type === 'stars'
-    ? `${order.amount} Telegram Stars`
-    : `Telegram Premium на ${order.amount} мес.`;
+async function sendDeliveredClientMessage(order, txHash = '') {
+  const itemDesc = formatOrderItemDesc(order.type, order.amount);
+  const recLabel = order.type === 'ton' ? 'Кошелёк' : 'Получатель';
+  const hashVal = txHash || order.tx_hash || '';
+  const txLine = order.type === 'ton' && hashVal
+    ? `\n🔗 <a href="https://tonviewer.com/transaction/${encodeURIComponent(hashVal)}">Посмотреть в Tonviewer</a>`
+    : '';
 
   const clientMsg =
     `<b>Заказ #${escapeHtml(order.id)} выполнен</b>\n\n` +
     `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
-    `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
+    `${recLabel}: <code>${escapeHtml(order.recipient_username)}</code>\n` +
+    (order.ton_memo ? `Memo: <code>${escapeHtml(order.ton_memo)}</code>\n` : '') +
     `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
-    `Товар успешно доставлен на указанный аккаунт. Спасибо за покупку в Nate Stars.`;
+    `Товар успешно доставлен. Спасибо за покупку в Nate Stars.${txLine}`;
 
   try {
-    await bot.telegram.sendMessage(order.telegram_id, clientMsg, { parse_mode: 'HTML' });
+    await bot.telegram.sendMessage(order.telegram_id, clientMsg, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
+    });
   } catch (e) {
     console.warn('Не удалось уведомить клиента:', e.message);
   }
 }
 
 /**
- * Единая точка выполнения заказа (отправка через Fragment + перевод в confirmed или paid_processing).
+ * Единая точка выполнения заказа (отправка через Fragment для Stars/Premium или блокчейн TON для TON).
  */
 async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual', cardXabarInfo = null, skipGroupNotice = false } = {}) {
   const order = dao.getOrder(orderId);
@@ -185,29 +220,33 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
   // Сразу фиксируем статус 'paid_processing' (оплата получена), чтобы исключить гонку и потерю заказа
   dao.updateOrderStatus(orderId, 'paid_processing', source);
 
-  const fragmentRes = await FragmentService.dispatchOrder(order);
-  console.log(`⚡ [Order Fulfill #${orderId} via ${source}]`, fragmentRes);
+  const isTonOrder = order.type === 'ton';
+  const deliveryRes = isTonOrder
+    ? await TonTransferService.sendOrderTon(order)
+    : await FragmentService.dispatchOrder(order);
+  console.log(`⚡ [Order Fulfill #${orderId} via ${source}]`, deliveryRes);
 
-  const itemDesc = order.type === 'stars'
-    ? `${order.amount} Telegram Stars`
-    : `Telegram Premium на ${order.amount} мес.`;
+  const itemDesc = formatOrderItemDesc(order.type, order.amount);
+  const providerLabel = isTonOrder ? 'TON Transfer' : 'Fragment';
+  const retryBtnText = isTonOrder ? '🔄 Повторить отправку TON' : '🔄 Повторить Fragment';
 
-  if (fragmentRes.success) {
+  if (deliveryRes.success) {
     const curSettings = dao.getAllSettings();
     const orderCostUzs = Number(order.cost_uzs || 0) > 0
       ? Number(order.cost_uzs)
       : calculateCostUzs(order.type, order.amount, curSettings);
     dao.updateOrderDeliveryCost(orderId, {
       costUzs: orderCostUzs,
-      tonSpent: fragmentRes.tonSpent || 0
+      tonSpent: deliveryRes.tonSpent || 0,
+      txHash: deliveryRes.txHash || ''
     });
     dao.updateOrderStatus(orderId, 'confirmed', source);
-    await sendDeliveredClientMessage(order);
+    await sendDeliveredClientMessage(dao.getOrder(orderId), deliveryRes.txHash || '');
   } else {
     const waitClientMsg =
       `✅ <b>Оплата по заказу #${escapeHtml(order.id)} получена!</b>\n\n` +
       `Товар: <b>${escapeHtml(itemDesc)}</b>\n` +
-      `Получатель: <b>${escapeHtml(order.recipient_username)}</b>\n` +
+      `${isTonOrder ? 'Кошелёк' : 'Получатель'}: <code>${escapeHtml(order.recipient_username)}</code>\n` +
       `Сумма: <b>${formatUzs(order.price_uzs)}</b>\n\n` +
       `⏳ Администратор уже получил заказ и скоро отправит его вручную (если администратор сейчас на учёбе или занят, выдача может занять немного времени — не переживайте, статус заказа виден в шапке магазина).`;
     try {
@@ -221,12 +260,14 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
   checkLowTonBalanceAndNotify({ triggerOrderId: orderId }).catch(() => {});
 
   if (!skipGroupNotice) {
-    let fragmentNote = '';
-    if (fragmentRes.success) {
-      fragmentNote = `⚡ <b>Fragment:</b> ${escapeHtml(fragmentRes.message)}`;
-      if (fragmentRes.txHash) fragmentNote += `\n🔗 <code>${escapeHtml(fragmentRes.txHash)}</code>`;
+    let deliveryNote = '';
+    if (deliveryRes.success) {
+      deliveryNote = `⚡ <b>${providerLabel}:</b> ${escapeHtml(deliveryRes.message)}`;
+      if (deliveryRes.txHash) {
+        deliveryNote += `\n🔗 <code>${escapeHtml(deliveryRes.txHash)}</code>`;
+      }
     } else {
-      fragmentNote = `⚠️ <b>Fragment:</b> ${escapeHtml(fragmentRes.error)}\n<i>Заказ помечен «Оплачен · Ожидает выдачи». Пополните TON и нажмите «Повторить Fragment» или выдайте вручную.</i>`;
+      deliveryNote = `⚠️ <b>${providerLabel}:</b> ${escapeHtml(deliveryRes.error)}\n<i>Заказ помечен «Оплачен · Ожидает выдачи». Пополните TON и нажмите «${retryBtnText}» или выдайте вручную.</i>`;
     }
 
     const header = source === 'cardxabar'
@@ -243,18 +284,19 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
       `${header}\n\n` +
       cardLine +
       `• <b>Покупатель:</b> ${escapeHtml(order.buyer_username)}\n` +
-      `• <b>Получатель:</b> ${escapeHtml(order.recipient_username)}\n` +
+      `• <b>${isTonOrder ? 'Кошелёк' : 'Получатель'}:</b> <code>${escapeHtml(order.recipient_username)}</code>\n` +
+      (order.ton_memo ? `• <b>Memo:</b> <code>${escapeHtml(order.ton_memo)}</code>\n` : '') +
       `• <b>Товар:</b> ${escapeHtml(itemDesc)}\n` +
       `• <b>Сумма:</b> <code>${formatUzs(order.price_uzs)}</code>\n\n` +
-      fragmentNote;
+      deliveryNote;
 
-    const extraOpts = fragmentRes.success
+    const extraOpts = deliveryRes.success
       ? {}
       : {
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '🔄 Повторить Fragment', callback_data: `retry_frag_${order.id}` },
+                { text: retryBtnText, callback_data: `retry_frag_${order.id}` },
                 { text: '✅ Выдано вручную', callback_data: `manual_done_${order.id}` }
               ]
             ]
@@ -264,7 +306,7 @@ async function fulfillOrder(orderId, { confirmedBy = 'Admin', source = 'manual',
     await sendToAdminAndGroup(groupMsg, extraOpts);
   }
 
-  return { ok: true, order: dao.getOrder(orderId), fragment: fragmentRes };
+  return { ok: true, order: dao.getOrder(orderId), fragment: deliveryRes };
 }
 
 async function completeOrderManually(orderId) {
@@ -467,7 +509,7 @@ async function checkLowTonBalanceAndNotify({ force = false, triggerOrderId = nul
 function formatProfitReportText(profitStats, walletBalance, threshold) {
   const fmtPeriod = (label, b) => (
     `<b>${label}:</b>\n` +
-    `• Заказов: <b>${b.orders}</b> (⭐ ${b.starsCount.toLocaleString('ru-RU')} шт. · Premium: ${b.premiumCount})\n` +
+    `• Заказов: <b>${b.orders}</b> (⭐ ${b.starsCount.toLocaleString('ru-RU')} · Prem: ${b.premiumCount} · TON: ${b.tonSoldAmount})\n` +
     `• Оборот: <b>${formatUzs(b.revenueUzs)}</b>\n` +
     `• Себест.: ${formatUzs(b.costUzs)} → <b>Прибыль: ${formatUzs(b.profitUzs)}</b> (${b.marginPct}%)`
   );
@@ -632,8 +674,18 @@ app.get('/api/catalog', (req, res) => {
     premium3Uzs: Number(settings.premium_3_uzs || 175000),
     premium6Uzs: Number(settings.premium_6_uzs || 245000),
     premium12Uzs: Number(settings.premium_12_uzs || 395000),
+    tonPriceUzs: Number(settings.ton_price_uzs || 20000),
+    minTon: Number(settings.min_ton || 0.5),
+    maxTon: Number(settings.max_ton || 50),
     autoConfirmEnabled: settings.auto_confirm_enabled === 'true'
   });
+});
+
+// Проверка и форматирование TON-адреса перед оплатой
+app.get('/api/ton/validate-address', auth, (req, res) => {
+  const address = String(req.query.address || '').trim();
+  const ownWalletAddress = FragmentService.getConfig().walletAddress;
+  res.json(parseAndValidateAddress(address, { ownWalletAddress }));
 });
 
 // Профиль пользователя, флаг isAdmin и активные заказы в работе
@@ -754,7 +806,10 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
     costStarUzs,
     costPrem3Uzs,
     costPrem6Uzs,
-    costPrem12Uzs
+    costPrem12Uzs,
+    tonPriceUzs,
+    costTonUzs,
+    minTon
   } = req.body;
 
   if (starPriceUzs) dao.setSetting('star_price_uzs', String(starPriceUzs));
@@ -771,6 +826,9 @@ app.post('/api/admin/update-settings', auth, requireAdmin, (req, res) => {
   if (costPrem3Uzs !== undefined && costPrem3Uzs !== '') dao.setSetting('cost_prem_3_uzs', String(costPrem3Uzs));
   if (costPrem6Uzs !== undefined && costPrem6Uzs !== '') dao.setSetting('cost_prem_6_uzs', String(costPrem6Uzs));
   if (costPrem12Uzs !== undefined && costPrem12Uzs !== '') dao.setSetting('cost_prem_12_uzs', String(costPrem12Uzs));
+  if (tonPriceUzs !== undefined && tonPriceUzs !== '') dao.setSetting('ton_price_uzs', String(tonPriceUzs));
+  if (costTonUzs !== undefined && costTonUzs !== '') dao.setSetting('cost_ton_uzs', String(costTonUzs));
+  if (minTon !== undefined && minTon !== '') dao.setSetting('min_ton', String(minTon));
 
   // Настройки Fragment
   if (fragmentEnabled !== undefined) dao.setSetting('fragment_enabled', String(fragmentEnabled));
@@ -942,17 +1000,8 @@ app.post('/api/admin/order-action', auth, requireAdmin, async (req, res) => {
 // Шаг 1 оформления заказа: резервирование точной суммы («копеек») до перевода
 app.post('/api/orders/prepare', auth, (req, res) => {
   try {
-    const { recipientUsername, type, amount } = req.body;
+    const { recipientUsername, type, amount, tonMemo } = req.body;
     const tgUser = req.telegramUser;
-
-    if (!recipientUsername) {
-      return res.status(400).json({ error: 'Укажите @username получателя' });
-    }
-
-    const cleanUsername = recipientUsername.replace(/^@/, '').trim();
-    if (!cleanUsername) {
-      return res.status(400).json({ error: 'Некорректный username' });
-    }
 
     const settings = dao.getAllSettings();
     let calc;
@@ -962,17 +1011,39 @@ app.post('/api/orders/prepare', auth, (req, res) => {
       return res.status(400).json({ error: e.message });
     }
 
-    const { basePriceUzs, itemDescription } = calc;
+    let fullRecipient = '';
+    let cleanMemo = '';
+    if (type === 'ton') {
+      const addrCheck = parseAndValidateAddress(recipientUsername, {
+        ownWalletAddress: FragmentService.getConfig().walletAddress
+      });
+      if (!addrCheck.valid) {
+        return res.status(400).json({ error: addrCheck.reason });
+      }
+      fullRecipient = addrCheck.rawInput;
+      cleanMemo = String(tonMemo || '').trim().slice(0, 120);
+    } else {
+      if (!recipientUsername) {
+        return res.status(400).json({ error: 'Укажите @username получателя' });
+      }
+      const cleanUsername = recipientUsername.replace(/^@/, '').trim();
+      if (!cleanUsername) {
+        return res.status(400).json({ error: 'Некорректный username' });
+      }
+      fullRecipient = '@' + cleanUsername;
+    }
+
+    const { basePriceUzs, normalizedAmount, itemDescription } = calc;
     const autoConfirm = settings.auto_confirm_enabled === 'true';
     const cardNumber = settings.card_number || '5614681816265841';
-    const fullRecipient = '@' + cleanUsername;
 
     const existing = dao.findReusableAwaitingOrder({
       telegramId: tgUser.id,
       type,
-      amount: Number(amount),
+      amount: normalizedAmount,
       recipientUsername: fullRecipient,
-      basePriceUzs
+      basePriceUzs,
+      tonMemo: cleanMemo
     });
 
     if (existing) {
@@ -987,13 +1058,14 @@ app.post('/api/orders/prepare', auth, (req, res) => {
           itemDescription,
           cardNumber: existing.card_number,
           recipientUsername: existing.recipient_username,
+          tonMemo: existing.ton_memo || '',
           status: existing.status
         }
       });
     }
 
     const finalPriceUzs = autoConfirm ? dao.allocateUniquePrice(basePriceUzs) : basePriceUzs;
-    const costUzs = calculateCostUzs(type, amount, settings);
+    const costUzs = calculateCostUzs(type, normalizedAmount, settings);
     const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
 
     dao.createOrder({
@@ -1002,13 +1074,14 @@ app.post('/api/orders/prepare', auth, (req, res) => {
       buyerUsername: tgUser.username ? '@' + tgUser.username : tgUser.first_name,
       recipientUsername: fullRecipient,
       type,
-      amount: Number(amount),
+      amount: normalizedAmount,
       priceUzs: finalPriceUzs,
       basePriceUzs,
       costUzs,
       cardNumber,
       status: 'awaiting_payment',
-      senderComment: ''
+      senderComment: '',
+      tonMemo: cleanMemo
     });
 
     res.json({
@@ -1022,6 +1095,7 @@ app.post('/api/orders/prepare', auth, (req, res) => {
         itemDescription,
         cardNumber,
         recipientUsername: fullRecipient,
+        tonMemo: cleanMemo,
         status: 'awaiting_payment'
       }
     });
@@ -1084,7 +1158,7 @@ app.get('/api/orders/:id/status', auth, (req, res) => {
 // Совместимый эндпоинт прямого создания заказа (если вызван без prepare)
 app.post('/api/create-order', auth, async (req, res) => {
   try {
-    const { recipientUsername, type, amount, senderComment, orderId: preparedId } = req.body;
+    const { recipientUsername, type, amount, senderComment, orderId: preparedId, tonMemo } = req.body;
     const tgUser = req.telegramUser;
 
     if (preparedId) {
@@ -1097,9 +1171,7 @@ app.post('/api/create-order', auth, async (req, res) => {
         dao.markOrderPaidByUser(preparedId, String(senderComment || '').trim());
         const updated = dao.getOrder(preparedId);
         if (wasAwaiting) await notifyAdminsOfPendingOrder(updated);
-        const itemDescription = existing.type === 'stars'
-          ? `${existing.amount} Telegram Stars`
-          : `Telegram Premium на ${existing.amount} мес.`;
+        const itemDescription = formatOrderItemDesc(existing.type, existing.amount);
         return res.json({
           success: true,
           order: {
@@ -1114,15 +1186,6 @@ app.post('/api/create-order', auth, async (req, res) => {
       }
     }
 
-    if (!recipientUsername) {
-      return res.status(400).json({ error: 'Укажите @username получателя' });
-    }
-
-    const cleanUsername = recipientUsername.replace(/^@/, '').trim();
-    if (!cleanUsername) {
-      return res.status(400).json({ error: 'Некорректный username' });
-    }
-
     const settings = dao.getAllSettings();
     let calc;
     try {
@@ -1131,10 +1194,32 @@ app.post('/api/create-order', auth, async (req, res) => {
       return res.status(400).json({ error: e.message });
     }
 
-    const { basePriceUzs, itemDescription } = calc;
+    let fullRecipient = '';
+    let cleanMemo = '';
+    if (type === 'ton') {
+      const addrCheck = parseAndValidateAddress(recipientUsername, {
+        ownWalletAddress: FragmentService.getConfig().walletAddress
+      });
+      if (!addrCheck.valid) {
+        return res.status(400).json({ error: addrCheck.reason });
+      }
+      fullRecipient = addrCheck.rawInput;
+      cleanMemo = String(tonMemo || '').trim().slice(0, 120);
+    } else {
+      if (!recipientUsername) {
+        return res.status(400).json({ error: 'Укажите @username получателя' });
+      }
+      const cleanUsername = recipientUsername.replace(/^@/, '').trim();
+      if (!cleanUsername) {
+        return res.status(400).json({ error: 'Некорректный username' });
+      }
+      fullRecipient = '@' + cleanUsername;
+    }
+
+    const { basePriceUzs, normalizedAmount, itemDescription } = calc;
     const autoConfirm = settings.auto_confirm_enabled === 'true';
     const priceUzs = autoConfirm ? dao.allocateUniquePrice(basePriceUzs) : basePriceUzs;
-    const costUzs = calculateCostUzs(type, amount, settings);
+    const costUzs = calculateCostUzs(type, normalizedAmount, settings);
     const orderId = 'NS-' + Math.floor(100000 + Math.random() * 900000);
     const cardNumber = settings.card_number || '5614681816265841';
 
@@ -1142,15 +1227,16 @@ app.post('/api/create-order', auth, async (req, res) => {
       id: orderId,
       telegramId: tgUser.id,
       buyerUsername: tgUser.username ? '@' + tgUser.username : tgUser.first_name,
-      recipientUsername: '@' + cleanUsername,
+      recipientUsername: fullRecipient,
       type,
-      amount: Number(amount),
+      amount: normalizedAmount,
       priceUzs,
       basePriceUzs,
       costUzs,
       cardNumber,
       status: 'pending',
-      senderComment
+      senderComment,
+      tonMemo: cleanMemo
     });
 
     await notifyAdminsOfPendingOrder(dao.getOrder(orderId));
@@ -1162,7 +1248,7 @@ app.post('/api/create-order', auth, async (req, res) => {
         priceUzs,
         itemDescription,
         cardNumber,
-        recipientUsername: '@' + cleanUsername,
+        recipientUsername: fullRecipient,
         status: 'pending'
       }
     });
@@ -1259,6 +1345,7 @@ bot.command('admin', async (ctx) => {
 
   const settings = dao.getAllSettings();
   const starPrice = settings.star_price_uzs || '220';
+  const tonPrice = settings.ton_price_uzs || '20000';
   const prem3 = settings.premium_3_uzs || '175000';
   const prem6 = settings.premium_6_uzs || '245000';
   const prem12 = settings.premium_12_uzs || '395000';
@@ -1269,6 +1356,7 @@ bot.command('admin', async (ctx) => {
     `<b>Панель управления Nate Stars</b>\n\n` +
     `Текущие тарифы:\n` +
     `• 1 звезда: <b>${starPrice} сум</b>\n` +
+    `• 1 TON: <b>${formatUzs(tonPrice)}</b>\n` +
     `• Premium 3 мес: <b>${formatUzs(prem3)}</b>\n` +
     `• Premium 6 мес: <b>${formatUzs(prem6)}</b>\n` +
     `• Premium 12 мес: <b>${formatUzs(prem12)}</b>\n` +
@@ -1288,7 +1376,10 @@ bot.command('admin', async (ctx) => {
           { text: '📣 Рассылка', callback_data: 'admin_broadcast' },
           { text: '📋 Ожидающие заказы', callback_data: 'view_pending_orders' }
         ],
-        [{ text: 'Цена за 1 звезду', callback_data: 'edit_star_price' }],
+        [
+          { text: 'Цена за 1 звезду', callback_data: 'edit_star_price' },
+          { text: 'Цена за 1 TON', callback_data: 'edit_ton_price' }
+        ],
         [
           { text: 'Premium 3м', callback_data: 'edit_prem_3' },
           { text: 'Premium 6м', callback_data: 'edit_prem_6' },
@@ -1409,6 +1500,10 @@ bot.action(/edit_(.+)/, async (ctx) => {
       adminStates.set(userId, 'set_star_price');
       promptText = 'Введите новую цену за 1 звезду в сумах (например: <code>230</code>):';
       break;
+    case 'ton_price':
+      adminStates.set(userId, 'set_ton_price');
+      promptText = 'Введите новую цену за 1 TON в сумах (например: <code>20000</code>):';
+      break;
     case 'prem_3':
       adminStates.set(userId, 'set_prem_3');
       promptText = 'Введите цену на Premium 3 месяца в сумах (например: <code>180000</code>):';
@@ -1450,11 +1545,12 @@ bot.action('view_pending_orders', async (ctx) => {
   }
 
   for (const order of pending.slice(0, 5)) {
-    const desc = order.type === 'stars' ? `${order.amount} Stars` : `Premium ${order.amount} мес.`;
+    const desc = formatOrderItemDesc(order.type, order.amount);
     const msg = 
       `<b>Заказ #${escapeHtml(order.id)}</b>\n` +
       `Покупатель: ${escapeHtml(order.buyer_username)} (ID: <code>${order.telegram_id}</code>)\n` +
-      `Получатель: ${escapeHtml(order.recipient_username)}\n` +
+      `${order.type === 'ton' ? 'Кошелёк' : 'Получатель'}: <code>${escapeHtml(order.recipient_username)}</code>\n` +
+      (order.ton_memo ? `Memo: <code>${escapeHtml(order.ton_memo)}</code>\n` : '') +
       `Товар: ${escapeHtml(desc)}\n` +
       `Сумма: <code>${formatUzs(order.price_uzs)}</code>\n` +
       `Дата: ${escapeHtml(order.created_at)}`;
@@ -1577,24 +1673,27 @@ bot.action(/real_confirm_(.+)/, async (ctx) => {
     skipGroupNotice: true
   });
 
-  const fragmentRes = fulfilled.fragment || { success: false, error: 'Не выполнен' };
+  const deliveryRes = fulfilled.fragment || { success: false, error: 'Не выполнен' };
+  const isTon = order.type === 'ton';
+  const providerLabel = isTon ? 'TON Transfer' : 'Fragment';
+  const retryText = isTon ? '🔄 Повторить отправку TON' : '🔄 Повторить Fragment';
   let fragmentNote = '';
   let replyMarkup;
   let statusLine;
 
-  if (fragmentRes.success) {
+  if (deliveryRes.success) {
     statusLine = `✅ <b>ПОДТВЕРЖДЁН И ВЫДАН</b> (${escapeHtml(adminName)})`;
-    fragmentNote = `\n⚡ <b>Fragment:</b> ${escapeHtml(fragmentRes.message)}`;
-    if (fragmentRes.txHash) fragmentNote += `\n🔗 <code>${escapeHtml(fragmentRes.txHash)}</code>`;
+    fragmentNote = `\n⚡ <b>${providerLabel}:</b> ${escapeHtml(deliveryRes.message)}`;
+    if (deliveryRes.txHash) fragmentNote += `\n🔗 <code>${escapeHtml(deliveryRes.txHash)}</code>`;
     replyMarkup = {
       inline_keyboard: [[{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]]
     };
   } else {
     statusLine = `⏳ <b>ОПЛАТА ПОДТВЕРЖДЕНА, ОЖИДАЕТ ВЫДАЧИ</b> (${escapeHtml(adminName)})`;
-    fragmentNote = `\n⚠️ <b>Fragment:</b> ${escapeHtml(fragmentRes.error)}`;
+    fragmentNote = `\n⚠️ <b>${providerLabel}:</b> ${escapeHtml(deliveryRes.error)}`;
     replyMarkup = {
       inline_keyboard: [[
-        { text: '🔄 Повторить Fragment', callback_data: `retry_frag_${orderId}` },
+        { text: retryText, callback_data: `retry_frag_${orderId}` },
         { text: '✅ Выдано вручную', callback_data: `manual_done_${orderId}` }
       ]]
     };
@@ -1629,7 +1728,7 @@ bot.action(/retry_frag_(.+)/, async (ctx) => {
     return;
   }
 
-  await ctx.answerCbQuery('Пробуем отправить через Fragment...');
+  await ctx.answerCbQuery(order.type === 'ton' ? 'Пробуем отправить TON...' : 'Пробуем отправить через Fragment...');
   const adminName = ctx.from.username ? '@' + ctx.from.username : ctx.from.first_name;
   const fulfilled = await fulfillOrder(orderId, {
     confirmedBy: adminName,
@@ -1637,13 +1736,14 @@ bot.action(/retry_frag_(.+)/, async (ctx) => {
     skipGroupNotice: true
   });
 
-  const fragmentRes = fulfilled.fragment || { success: false, error: 'Ошибка отправки' };
-  if (fragmentRes.success) {
+  const deliveryRes = fulfilled.fragment || { success: false, error: 'Ошибка отправки' };
+  const doneHeader = order.type === 'ton' ? 'ВЫДАН В СЕТИ TON' : 'ВЫДАН ЧЕРЕЗ FRAGMENT';
+  if (deliveryRes.success) {
     try {
       const originalText = ctx.callbackQuery.message.text || '';
       await ctx.editMessageText(
-        originalText + `\n\n✅ <b>ВЫДАН ЧЕРЕЗ FRAGMENT</b> (${escapeHtml(adminName)})\n⚡ ${escapeHtml(fragmentRes.message)}` +
-        (fragmentRes.txHash ? `\n🔗 <code>${escapeHtml(fragmentRes.txHash)}</code>` : ''),
+        originalText + `\n\n✅ <b>${doneHeader}</b> (${escapeHtml(adminName)})\n⚡ ${escapeHtml(deliveryRes.message)}` +
+        (deliveryRes.txHash ? `\n🔗 <code>${escapeHtml(deliveryRes.txHash)}</code>` : ''),
         {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '✅ Выполнен', callback_data: `done_${orderId}` }]] }
@@ -1652,7 +1752,7 @@ bot.action(/retry_frag_(.+)/, async (ctx) => {
     } catch (e) {}
   } else {
     try {
-      await ctx.reply(`⚠️ Заказ <b>#${escapeHtml(orderId)}</b> пока не отправлен: ${escapeHtml(fragmentRes.error)}`, { parse_mode: 'HTML' });
+      await ctx.reply(`⚠️ Заказ <b>#${escapeHtml(orderId)}</b> пока не отправлен: ${escapeHtml(deliveryRes.error)}`, { parse_mode: 'HTML' });
     } catch (e) {}
   }
 });
@@ -1821,6 +1921,12 @@ bot.on('text', async (ctx, next) => {
       if (isNaN(num) || num <= 0) return ctx.reply('Введите положительное число.');
       dao.setSetting('star_price_uzs', String(num));
       return ctx.reply(`Цена за 1 звезду сохранена: <b>${num} сум</b>`, { parse_mode: 'HTML' });
+    }
+    case 'set_ton_price': {
+      const num = parseInt(text.replace(/\s+/g, ''), 10);
+      if (isNaN(num) || num <= 0) return ctx.reply('Введите положительное число.');
+      dao.setSetting('ton_price_uzs', String(num));
+      return ctx.reply(`Цена за 1 TON сохранена: <b>${formatUzs(num)}</b>`, { parse_mode: 'HTML' });
     }
     case 'set_prem_3': {
       const num = parseInt(text.replace(/\s+/g, ''), 10);

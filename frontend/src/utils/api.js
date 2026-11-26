@@ -54,6 +54,11 @@ const API = (() => {
       return request(`/api/recipient-preview?username=${encodeURIComponent(username)}`);
     },
 
+    // Проверка TON-адреса
+    validateTonAddress(address) {
+      return request(`/api/ton/validate-address?address=${encodeURIComponent(address)}`);
+    },
+
     // Подготовить заказ (зарезервировать точную сумму с «копейками»)
     prepareOrder(orderData) {
       return request('/api/orders/prepare', {

@@ -23,10 +23,14 @@ let catalog = {
   premium3Uzs: 175000,
   premium6Uzs: 245000,
   premium12Uzs: 395000,
+  tonPriceUzs: 20000,
+  minTon: 0.5,
+  maxTon: 50,
   autoConfirmEnabled: false
 };
 
 let starsAmount = 100;
+let tonAmount = 1;
 let pendingOrder = null;
 let orderPollTimer = null;
 let cxQrPollTimer = null;
@@ -34,9 +38,18 @@ let cachedCxStatus = null;
 let recipientPreviewTimer = null;
 let recipientPreviewSeq = 0;
 let lastRecipientPreview = null;
+let tonAddrTimer = null;
+let tonAddrSeq = 0;
+let lastTonAddrCheck = null;
 let cachedProfitStats = null;
 let selectedProfitPeriod = 'today';
 let cachedLowTonThreshold = 5;
+
+function formatUiItemDesc(type, amount, short = false) {
+  if (type === 'stars') return short ? `${amount} ★` : `${amount} Stars`;
+  if (type === 'ton') return `${amount} TON`;
+  return `Premium ${amount} мес.`;
+}
 
 // ===== Инициализация =====
 document.addEventListener('DOMContentLoaded', () => {
@@ -64,6 +77,13 @@ async function initApp() {
         recipientInput.value = recipientInput.value.replace(/^@+/, '');
       }
       scheduleRecipientPreview(recipientInput.value);
+    });
+  }
+
+  const tonAddrInput = document.getElementById('tonAddressInput');
+  if (tonAddrInput) {
+    tonAddrInput.addEventListener('input', () => {
+      scheduleTonAddressCheck(tonAddrInput.value);
     });
   }
 
@@ -134,7 +154,118 @@ function applyCatalogToUI() {
   if (pm6) pm6.textContent = `~${Helpers.formatUzs(Math.round(catalog.premium6Uzs / 6))} / мес`;
   if (pm12) pm12.textContent = `~${Helpers.formatUzs(Math.round(catalog.premium12Uzs / 12))} / мес`;
 
+  const tonRateBadge = document.getElementById('tonRateBadge');
+  if (tonRateBadge) {
+    tonRateBadge.textContent = `1 TON = ${Helpers.formatUzs(catalog.tonPriceUzs)}`;
+  }
+
   updateStarsCalc();
+  updateTonCalc();
+}
+
+// ===== Калькулятор TON =====
+
+function roundTon(val) {
+  return Math.round(Number(val) * 100) / 100;
+}
+
+function setTon(amount) {
+  Helpers.haptic('light');
+  tonAmount = Math.max(catalog.minTon || 0.5, roundTon(amount));
+  const input = document.getElementById('tonAmountInput');
+  if (input) input.value = tonAmount;
+
+  document.querySelectorAll('.ton-preset-pill').forEach(btn => {
+    const btnVal = parseFloat(btn.textContent.replace(/\s+/g, ''));
+    btn.classList.toggle('active', btnVal === tonAmount);
+  });
+
+  updateTonCalc();
+}
+
+function adjustTon(diff) {
+  Helpers.haptic('light');
+  tonAmount = Math.max(catalog.minTon || 0.5, roundTon(tonAmount + diff));
+  const input = document.getElementById('tonAmountInput');
+  if (input) input.value = tonAmount;
+
+  document.querySelectorAll('.ton-preset-pill').forEach(btn => {
+    const btnVal = parseFloat(btn.textContent.replace(/\s+/g, ''));
+    btn.classList.toggle('active', btnVal === tonAmount);
+  });
+
+  updateTonCalc();
+}
+
+function onTonInputChange() {
+  const input = document.getElementById('tonAmountInput');
+  if (!input) return;
+  let val = parseFloat(String(input.value).replace(',', '.'));
+  if (isNaN(val) || val <= 0) val = catalog.minTon || 0.5;
+  tonAmount = roundTon(val);
+
+  document.querySelectorAll('.ton-preset-pill').forEach(btn => {
+    const btnVal = parseFloat(btn.textContent.replace(/\s+/g, ''));
+    btn.classList.toggle('active', btnVal === tonAmount);
+  });
+
+  updateTonCalc();
+}
+
+function updateTonCalc() {
+  const price = Math.round(tonAmount * Number(catalog.tonPriceUzs || 20000));
+  const priceEl = document.getElementById('tonPriceText');
+  if (priceEl) {
+    priceEl.textContent = Helpers.formatUzs(price);
+  }
+}
+
+function scheduleTonAddressCheck(rawVal) {
+  if (tonAddrTimer) clearTimeout(tonAddrTimer);
+  const clean = String(rawVal || '').trim();
+  const box = document.getElementById('tonAddressStatusBox');
+  if (!clean) {
+    lastTonAddrCheck = null;
+    if (box) { box.style.display = 'none'; box.textContent = ''; }
+    return;
+  }
+  if (clean.length < 20) {
+    lastTonAddrCheck = { valid: false, rawInput: clean, reason: 'Адрес TON слишком короткий' };
+    if (box) {
+      box.style.display = 'block';
+      box.style.color = 'var(--state-pending)';
+      box.textContent = 'Введите полный TON-адрес (48 символов UQ... или EQ...)';
+    }
+    return;
+  }
+  tonAddrTimer = setTimeout(() => validateTonAddressRemote(clean), 350);
+}
+
+async function validateTonAddressRemote(rawVal) {
+  const clean = String(rawVal || '').trim();
+  const seq = ++tonAddrSeq;
+  const box = document.getElementById('tonAddressStatusBox');
+  if (!clean) return null;
+
+  try {
+    const res = await API.validateTonAddress(clean);
+    if (seq !== tonAddrSeq) return null;
+    lastTonAddrCheck = res;
+    if (box) {
+      box.style.display = 'block';
+      if (res.valid) {
+        box.style.color = 'var(--ok)';
+        box.textContent = `✓ Адрес проверен (${res.shortAddress})`;
+      } else {
+        box.style.color = 'var(--error)';
+        box.textContent = `✕ ${res.reason || 'Некорректный адрес'}`;
+      }
+    }
+    return res;
+  } catch (e) {
+    if (seq !== tonAddrSeq) return null;
+    return null;
+  }
 }
 
 // ===== Калькулятор звёзд =====
@@ -353,22 +484,25 @@ function validateRecipientForCheckout(recipient) {
 
 // ===== Чекаут =====
 
-async function startCheckoutFlow(type, amount, fallbackPrice, itemDesc, recipient) {
+async function startCheckoutFlow(type, amount, fallbackPrice, itemDesc, recipient, tonMemo = '') {
+  const recipientDisplay = type === 'ton' ? String(recipient || '').trim() : ('@' + recipient);
   pendingOrder = {
     id: null,
     type,
     amount,
     priceUzs: fallbackPrice,
     itemDesc,
-    recipient: '@' + recipient,
+    recipient: recipientDisplay,
+    tonMemo: String(tonMemo || '').trim(),
     autoConfirm: Boolean(catalog.autoConfirmEnabled)
   };
 
   try {
     const prep = await API.prepareOrder({
-      recipientUsername: '@' + recipient,
+      recipientUsername: recipientDisplay,
       type,
-      amount
+      amount,
+      tonMemo: pendingOrder.tonMemo
     });
     if (prep && prep.order) {
       pendingOrder.id = prep.order.id;
@@ -404,6 +538,45 @@ function openPremiumCheckout(months) {
   if (months === 12) price = catalog.premium12Uzs;
 
   startCheckoutFlow('premium', months, price, `Telegram Premium на ${months} мес.`, recipient);
+}
+
+async function openTonCheckout() {
+  const addrInput = document.getElementById('tonAddressInput');
+  const memoInput = document.getElementById('tonMemoInput');
+  const rawAddr = (addrInput?.value || '').trim();
+  const memo = (memoInput?.value || '').trim();
+
+  if (!rawAddr) {
+    Helpers.haptic('error');
+    Helpers.showToast('Укажите адрес вашего TON-кошелька');
+    if (addrInput) addrInput.focus();
+    return;
+  }
+
+  const minTon = Number(catalog.minTon || 0.5);
+  const maxTon = Number(catalog.maxTon || 50);
+  if (tonAmount < minTon) {
+    Helpers.showToast(`Минимальный заказ: ${minTon} TON`);
+    return;
+  }
+  if (tonAmount > maxTon) {
+    Helpers.showToast(`Максимум ${maxTon} TON за один заказ`);
+    return;
+  }
+
+  let check = lastTonAddrCheck;
+  if (!check || check.rawInput !== rawAddr) {
+    check = await validateTonAddressRemote(rawAddr);
+  }
+  if (check && check.valid === false) {
+    Helpers.haptic('error');
+    Helpers.showToast(check.reason || 'Некорректный TON-адрес');
+    if (addrInput) addrInput.focus();
+    return;
+  }
+
+  const price = Math.round(tonAmount * Number(catalog.tonPriceUzs || 20000));
+  startCheckoutFlow('ton', tonAmount, price, `${tonAmount} TON`, rawAddr, memo);
 }
 
 function showCheckoutModal() {
@@ -463,7 +636,10 @@ function renderActiveOrderBanner(activeOrders) {
 
   // Приоритет отдаём заказам, по которым оплата уже точно получена ('paid_processing')
   const top = list[0];
-  const itemDesc = top.type === 'stars' ? `${top.amount} ★` : `Premium ${top.amount} мес.`;
+  const itemDesc = formatUiItemDesc(top.type, top.amount, true);
+  const recLabel = top.type === 'ton'
+    ? `${top.recipient_username.slice(0, 6)}...${top.recipient_username.slice(-6)}`
+    : top.recipient_username;
   const extraCount = list.length > 1 ? ` <span style="opacity:0.7;">(+ ещё ${list.length - 1})</span>` : '';
   const isPaid = top.status === 'paid_processing';
 
@@ -480,7 +656,7 @@ function renderActiveOrderBanner(activeOrders) {
         <span class="active-banner-link">Открыть ›</span>
       </div>
       <div class="active-banner-desc">
-        Платёж принят! Администратор уже оформляет <strong>${escapeHtmlSafe(itemDesc)}</strong> для <strong>${escapeHtmlSafe(top.recipient_username)}</strong>. Скоро заказ будет отправлен — ожидайте!
+        Платёж принят! Администратор уже оформляет <strong>${escapeHtmlSafe(itemDesc)}</strong> для <strong>${escapeHtmlSafe(recLabel)}</strong>. Скоро заказ будет отправлен — ожидайте!
       </div>
     `;
   } else {
@@ -493,7 +669,7 @@ function renderActiveOrderBanner(activeOrders) {
         <span class="active-banner-link">Открыть ›</span>
       </div>
       <div class="active-banner-desc">
-        Проверяем поступление оплаты за <strong>${escapeHtmlSafe(itemDesc)}</strong> (${escapeHtmlSafe(top.recipient_username)}). Как только подтвердится, заказ будет отправлен — ожидайте!
+        Проверяем поступление оплаты за <strong>${escapeHtmlSafe(itemDesc)}</strong> (${escapeHtmlSafe(recLabel)}). Как только подтвердится, заказ будет отправлен — ожидайте!
       </div>
     `;
   }
@@ -627,7 +803,8 @@ async function submitPayment() {
         recipientUsername: pendingOrder.recipient,
         type: pendingOrder.type,
         amount: pendingOrder.amount,
-        senderComment
+        senderComment,
+        tonMemo: pendingOrder.tonMemo || ''
       });
     }
 
@@ -685,6 +862,11 @@ function switchTab(tab) {
     panel.classList.toggle('active', panel.id === `tab-${tab}`);
   });
 
+  const recSection = document.getElementById('recipientSection');
+  if (recSection) {
+    recSection.style.display = (tab === 'stars' || tab === 'premium') ? 'block' : 'none';
+  }
+
   if (tab !== 'admin') {
     stopCxQrPolling();
   }
@@ -718,9 +900,17 @@ async function loadOrders() {
     }
 
     container.innerHTML = orders.map(o => {
-      const itemDesc = o.type === 'stars' ? `${o.amount} Stars` : `Premium ${o.amount} мес.`;
-      const safeRec = escapeHtmlSafe(o.recipient_username);
+      const itemDesc = formatUiItemDesc(o.type, o.amount, false);
+      const rawRec = String(o.recipient_username || '');
+      const displayRec = o.type === 'ton' && rawRec.length > 18
+        ? `${rawRec.slice(0, 8)}...${rawRec.slice(-6)}`
+        : rawRec;
+      const safeRecAttr = escapeHtmlSafe(rawRec);
+      const safeMemoAttr = escapeHtmlSafe(o.ton_memo || '');
       const safeType = escapeHtmlSafe(o.type);
+      const txUrl = o.type === 'ton' && o.tx_hash
+        ? `https://tonviewer.com/transaction/${encodeURIComponent(o.tx_hash)}`
+        : '';
       return `
         <div class="order-entry">
           <div class="order-top">
@@ -737,20 +927,22 @@ async function loadOrders() {
               <div class="order-field-val">${Helpers.formatUzs(o.price_uzs)}</div>
             </div>
             <div>
-              <span class="order-field-label">Получатель</span>
-              <div class="order-field-val text-accent">${safeRec}</div>
+              <span class="order-field-label">${o.type === 'ton' ? 'Кошелёк' : 'Получатель'}</span>
+              <div class="order-field-val text-accent">${escapeHtmlSafe(displayRec)}</div>
             </div>
             <div>
               <span class="order-field-label">Дата</span>
               <div class="order-field-val">${Helpers.formatDate(o.created_at)}</div>
             </div>
           </div>
-          <div class="order-footer-row">
+          <div class="order-footer-row" style="justify-content: ${txUrl ? 'space-between' : 'flex-end'}; align-items:center; gap:8px;">
+            ${txUrl ? `<a href="${txUrl}" target="_blank" class="text-link" style="font-size:0.72rem; font-weight:600;">Tonviewer ↗</a>` : ''}
             <button type="button"
                     class="repeat-order-btn"
                     data-type="${safeType}"
                     data-amount="${Number(o.amount)}"
-                    data-recipient="${safeRec}"
+                    data-recipient="${safeRecAttr}"
+                    data-memo="${safeMemoAttr}"
                     onclick="repeatOrderFromBtn(this)">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="17 1 21 5 17 9"></polyline>
@@ -779,9 +971,23 @@ async function repeatOrderFromBtn(btn) {
   if (!btn) return;
   const type = btn.dataset.type || 'stars';
   const amount = Number(btn.dataset.amount || 100);
-  const recipient = String(btn.dataset.recipient || '').replace(/^@+/, '').trim();
+  const rawRecipient = String(btn.dataset.recipient || '').trim();
+  const memo = String(btn.dataset.memo || '').trim();
   Helpers.haptic('medium');
 
+  if (type === 'ton') {
+    const addrInput = document.getElementById('tonAddressInput');
+    const memoInput = document.getElementById('tonMemoInput');
+    if (addrInput) addrInput.value = rawRecipient;
+    if (memoInput) memoInput.value = memo;
+    switchTab('ton');
+    setTon(amount);
+    if (rawRecipient) await validateTonAddressRemote(rawRecipient);
+    openTonCheckout();
+    return;
+  }
+
+  const recipient = rawRecipient.replace(/^@+/, '');
   const input = document.getElementById('recipientInput');
   if (input && recipient) {
     input.value = recipient;
@@ -863,6 +1069,13 @@ async function loadAdminInfo() {
     if (sCostPrem12) sCostPrem12.value = settings.cost_prem_12_uzs || 370000;
     if (sLowTon) sLowTon.value = settings.low_ton_threshold || 5;
 
+    const sTonPrice = document.getElementById('settingTonPrice');
+    const sMinTon = document.getElementById('settingMinTon');
+    const sCostTon = document.getElementById('settingCostTon');
+    if (sTonPrice) sTonPrice.value = settings.ton_price_uzs || 20000;
+    if (sMinTon) sMinTon.value = settings.min_ton || 0.5;
+    if (sCostTon) sCostTon.value = settings.cost_ton_uzs || 18500;
+
     // Настройки Fragment
     const fragConfig = data.fragmentConfig || {};
     const fEnabled = document.getElementById('settingFragmentEnabled');
@@ -900,16 +1113,17 @@ async function loadAdminInfo() {
         `;
       } else {
         pendingContainer.innerHTML = pendingOrders.map(o => {
-          const itemDesc = o.type === 'stars' ? `${o.amount} Stars` : `Premium ${o.amount} мес.`;
+          const itemDesc = formatUiItemDesc(o.type, o.amount, false);
           const safeRec = escapeHtmlSafe(o.recipient_username);
           const safeBuyer = escapeHtmlSafe(o.buyer_username);
           const safeComment = escapeHtmlSafe(o.sender_comment);
           const isPaidProc = o.status === 'paid_processing';
+          const retryLabel = o.type === 'ton' ? '🔄 Повторить TON' : '🔄 Повторить Fragment';
 
           const actionsHtml = isPaidProc
             ? `
               <button class="action-btn-confirm" onclick="promptAdminOrder('${o.id}', 'retry', '${safeRec}', '${itemDesc}')">
-                🔄 Повторить Fragment
+                ${retryLabel}
               </button>
               <button class="action-btn-confirm" style="background:var(--ok); color:#052e16;" onclick="promptAdminOrder('${o.id}', 'manual_done', '${safeRec}', '${itemDesc}')">
                 ✅ Выдал вручную
@@ -1349,6 +1563,9 @@ async function saveAdminSettings() {
   const costPrem3Uzs = document.getElementById('settingCostPrem3')?.value;
   const costPrem6Uzs = document.getElementById('settingCostPrem6')?.value;
   const costPrem12Uzs = document.getElementById('settingCostPrem12')?.value;
+  const tonPriceUzs = document.getElementById('settingTonPrice')?.value;
+  const minTon = document.getElementById('settingMinTon')?.value;
+  const costTonUzs = document.getElementById('settingCostTon')?.value;
 
   try {
     const res = await API.updateAdminSettings({
@@ -1367,7 +1584,10 @@ async function saveAdminSettings() {
       costStarUzs,
       costPrem3Uzs,
       costPrem6Uzs,
-      costPrem12Uzs
+      costPrem12Uzs,
+      tonPriceUzs,
+      minTon,
+      costTonUzs
     });
 
     Helpers.haptic('success');
@@ -1532,7 +1752,8 @@ function renderProfitStats() {
   if (revEl) revEl.textContent = Helpers.formatUzs(stats.revenueUzs);
   if (costEl) costEl.textContent = Helpers.formatUzs(stats.costUzs);
   if (salesEl) {
-    salesEl.textContent = `${stats.orders} зак. (${stats.starsCount.toLocaleString('ru-RU')} ★ · Prem: ${stats.premiumCount})`;
+    const tonPart = stats.tonSoldAmount > 0 ? ` · TON: ${stats.tonSoldAmount}` : '';
+    salesEl.textContent = `${stats.orders} зак. (${stats.starsCount.toLocaleString('ru-RU')} ★ · Prem: ${stats.premiumCount}${tonPart})`;
   }
   if (marginEl) {
     marginEl.textContent = `Маржа ${stats.marginPct}%`;

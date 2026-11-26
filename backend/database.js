@@ -89,6 +89,8 @@ async function initDatabase() {
       payment_source TEXT DEFAULT 'manual',
       cost_uzs INTEGER DEFAULT 0,
       ton_spent REAL DEFAULT 0,
+      ton_memo TEXT DEFAULT '',
+      tx_hash TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     )
@@ -111,6 +113,12 @@ async function initDatabase() {
     }
     if (!orderCols.includes('ton_spent')) {
       db.run("ALTER TABLE orders ADD COLUMN ton_spent REAL DEFAULT 0");
+    }
+    if (!orderCols.includes('ton_memo')) {
+      db.run("ALTER TABLE orders ADD COLUMN ton_memo TEXT DEFAULT ''");
+    }
+    if (!orderCols.includes('tx_hash')) {
+      db.run("ALTER TABLE orders ADD COLUMN tx_hash TEXT DEFAULT ''");
     }
   } catch (e) {
     console.warn('Миграция orders:', e.message);
@@ -155,7 +163,11 @@ async function initDatabase() {
     'cost_star_uzs': '195',
     'cost_prem_3_uzs': '155000',
     'cost_prem_6_uzs': '207000',
-    'cost_prem_12_uzs': '370000'
+    'cost_prem_12_uzs': '370000',
+    'ton_price_uzs': '20000',
+    'cost_ton_uzs': '18500',
+    'min_ton': '0.5',
+    'max_ton': '50'
   };
 
   for (const [key, val] of Object.entries(defaultSettings)) {
@@ -181,10 +193,12 @@ async function initDatabase() {
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('admin_ids', '5379376281')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('orders_chat_id', '-1003724696975')");
 
-  // Авторизация Fragment (гарантированное сохранение настроек)
+  // Авторизация Fragment / TON-кошелька (переменная окружения TON_MNEMONIC имеет приоритет)
+  const envMnemonic = (process.env.TON_MNEMONIC || process.env.FRAGMENT_MNEMONICS || '').trim();
+  const activeMnemonic = envMnemonic || 'harbor age artwork marble cram manage dolphin evolve walnut firm dose dynamic lift castle eye boil guilt minute feel diesel search top void door';
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_enabled', 'true')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_phone', '+998930690203')");
-  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_mnemonics', 'harbor age artwork marble cram manage dolphin evolve walnut firm dose dynamic lift castle eye boil guilt minute feel diesel search top void door')");
+  db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_mnemonics', ?)", [activeMnemonic]);
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_wallet_address', 'UQCG_TZEtQ8_wPOqZgQEQ8mH0yUv8xJbVibY_eHTIhOt5LCk')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_api_key', 'e153ec41-bb0b-4e74-998d-bc5c7a36634c')");
   db.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragment_jwt_saved_at', ?)", [new Date().toISOString()]);
@@ -231,6 +245,9 @@ function calculateCostUzs(type, amount, settings) {
   const numAmount = Number(amount || 0);
   if (type === 'stars') {
     return Math.round(numAmount * Number(settings?.cost_star_uzs || 195));
+  }
+  if (type === 'ton') {
+    return Math.round(numAmount * Number(settings?.cost_ton_uzs || 18500));
   }
   if (numAmount === 3) return Number(settings?.cost_prem_3_uzs || 155000);
   if (numAmount === 6) return Number(settings?.cost_prem_6_uzs || 207000);
@@ -296,11 +313,11 @@ const dao = {
     return queryOne('SELECT * FROM users WHERE telegram_id = ?', [telegramId]);
   },
 
-  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, basePriceUzs, costUzs, cardNumber, status, senderComment, paymentSource }) {
+  createOrder({ id, telegramId, buyerUsername, recipientUsername, type, amount, priceUzs, basePriceUzs, costUzs, cardNumber, status, senderComment, paymentSource, tonMemo = '', txHash = '' }) {
     const nowIso = new Date().toISOString();
     runSql(`
-      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, base_price_uzs, cost_uzs, card_number, status, sender_comment, payment_source, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (id, telegram_id, buyer_username, recipient_username, type, amount, price_uzs, base_price_uzs, cost_uzs, card_number, status, sender_comment, payment_source, ton_memo, tx_hash, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       id,
       telegramId,
@@ -315,6 +332,8 @@ const dao = {
       status || 'pending',
       senderComment || '',
       paymentSource || 'manual',
+      String(tonMemo || ''),
+      String(txHash || ''),
       nowIso,
       nowIso
     ]);
@@ -337,15 +356,16 @@ const dao = {
     }
   },
 
-  updateOrderDeliveryCost(id, { costUzs, tonSpent = 0 } = {}) {
+  updateOrderDeliveryCost(id, { costUzs, tonSpent = 0, txHash = '' } = {}) {
     const nowIso = new Date().toISOString();
     runSql(`
       UPDATE orders
       SET cost_uzs = CASE WHEN ? > 0 THEN ? ELSE cost_uzs END,
           ton_spent = CASE WHEN ? > 0 THEN ? ELSE ton_spent END,
+          tx_hash = CASE WHEN ? != '' THEN ? ELSE tx_hash END,
           updated_at = ?
       WHERE id = ?
-    `, [Number(costUzs || 0), Number(costUzs || 0), Number(tonSpent || 0), Number(tonSpent || 0), nowIso, id]);
+    `, [Number(costUzs || 0), Number(costUzs || 0), Number(tonSpent || 0), Number(tonSpent || 0), String(txHash || ''), String(txHash || ''), nowIso, id]);
   },
 
   markOrderPaidByUser(id, senderComment) {
@@ -363,7 +383,7 @@ const dao = {
    * Повторно использует свежий неоплаченный заказ того же клиента (за последние 15 минут),
    * чтобы при закрытии/повторном открытии окна оплаты не тратились лишние «копейки».
    */
-  findReusableAwaitingOrder({ telegramId, type, amount, recipientUsername, basePriceUzs }) {
+  findReusableAwaitingOrder({ telegramId, type, amount, recipientUsername, basePriceUzs, tonMemo = '' }) {
     const cutoffIso = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const candidates = queryAll(`
       SELECT * FROM orders
@@ -374,7 +394,8 @@ const dao = {
 
     return candidates.find(o =>
       o.created_at >= cutoffIso &&
-      Number(o.base_price_uzs || o.price_uzs) === Number(basePriceUzs)
+      Number(o.base_price_uzs || o.price_uzs) === Number(basePriceUzs) &&
+      String(o.ton_memo || '') === String(tonMemo || '')
     ) || null;
   },
 
@@ -517,6 +538,8 @@ const dao = {
       processingOrders: 0,
       starsCount: 0,
       premiumCount: 0,
+      tonCount: 0,
+      tonSoldAmount: 0,
       revenueUzs: 0,
       costUzs: 0,
       profitUzs: 0,
@@ -536,7 +559,10 @@ const dao = {
       if (order.status === 'confirmed') b.confirmedOrders += 1;
       else b.processingOrders += 1;
       if (order.type === 'stars') b.starsCount += Number(order.amount || 0);
-      else b.premiumCount += 1;
+      else if (order.type === 'ton') {
+        b.tonCount += 1;
+        b.tonSoldAmount = Math.round((b.tonSoldAmount + Number(order.amount || 0)) * 10000) / 10000;
+      } else b.premiumCount += 1;
       b.revenueUzs += Number(order.price_uzs || 0);
       b.costUzs += estCost;
       b.tonSpent += Number(order.ton_spent || 0);
