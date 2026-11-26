@@ -23,8 +23,8 @@ let catalog = {
   premium3Uzs: 175000,
   premium6Uzs: 245000,
   premium12Uzs: 395000,
-  tonPriceUzs: 20000,
-  minTon: 0.5,
+  tonPriceUzs: 14000,
+  minTon: 0.2,
   maxTon: 50,
   autoConfirmEnabled: false
 };
@@ -159,6 +159,11 @@ function applyCatalogToUI() {
     tonRateBadge.textContent = `1 TON = ${Helpers.formatUzs(catalog.tonPriceUzs)}`;
   }
 
+  const tonInputEl = document.getElementById('tonAmountInput');
+  if (tonInputEl) {
+    tonInputEl.min = String(catalog.minTon || 0.2);
+  }
+
   updateStarsCalc();
   updateTonCalc();
 }
@@ -171,7 +176,7 @@ function roundTon(val) {
 
 function setTon(amount) {
   Helpers.haptic('light');
-  tonAmount = Math.max(catalog.minTon || 0.5, roundTon(amount));
+  tonAmount = Math.max(catalog.minTon || 0.2, roundTon(amount));
   const input = document.getElementById('tonAmountInput');
   if (input) input.value = tonAmount;
 
@@ -185,7 +190,7 @@ function setTon(amount) {
 
 function adjustTon(diff) {
   Helpers.haptic('light');
-  tonAmount = Math.max(catalog.minTon || 0.5, roundTon(tonAmount + diff));
+  tonAmount = Math.max(catalog.minTon || 0.2, roundTon(tonAmount + diff));
   const input = document.getElementById('tonAmountInput');
   if (input) input.value = tonAmount;
 
@@ -201,7 +206,7 @@ function onTonInputChange() {
   const input = document.getElementById('tonAmountInput');
   if (!input) return;
   let val = parseFloat(String(input.value).replace(',', '.'));
-  if (isNaN(val) || val <= 0) val = catalog.minTon || 0.5;
+  if (isNaN(val) || val <= 0) val = catalog.minTon || 0.2;
   tonAmount = roundTon(val);
 
   document.querySelectorAll('.ton-preset-pill').forEach(btn => {
@@ -553,7 +558,7 @@ async function openTonCheckout() {
     return;
   }
 
-  const minTon = Number(catalog.minTon || 0.5);
+  const minTon = Number(catalog.minTon || 0.2);
   const maxTon = Number(catalog.maxTon || 50);
   if (tonAmount < minTon) {
     Helpers.showToast(`Минимальный заказ: ${minTon} TON`);
@@ -1078,7 +1083,7 @@ async function loadAdminInfo() {
     const sMinTon = document.getElementById('settingMinTon');
     const sCostTon = document.getElementById('settingCostTon');
     if (sTonPrice) sTonPrice.value = settings.ton_price_uzs || 14000;
-    if (sMinTon) sMinTon.value = settings.min_ton || 0.5;
+    if (sMinTon) sMinTon.value = settings.min_ton || 0.2;
     if (sCostTon) sCostTon.value = settings.cost_ton_uzs || 12000;
 
     const sTonAuto = document.getElementById('settingTonAutoRateEnabled');

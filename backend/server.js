@@ -98,7 +98,7 @@ function calculateBasePrice(type, amount, settings) {
   if (type === 'ton') {
     const rawNum = parseFloat(String(amount).replace(',', '.'));
     const tonAmount = Math.round(rawNum * 100) / 100;
-    const minTon = Number(settings.min_ton || 0.5);
+    const minTon = Number(settings.min_ton || 0.2);
     const maxTon = Number(settings.max_ton || 50);
     if (!Number.isFinite(tonAmount) || tonAmount < minTon) {
       throw new Error(`Минимум ${minTon} TON`);
@@ -676,7 +676,7 @@ app.get('/api/catalog', (req, res) => {
     premium6Uzs: Number(settings.premium_6_uzs || 245000),
     premium12Uzs: Number(settings.premium_12_uzs || 395000),
     tonPriceUzs: Number(settings.ton_price_uzs || 20000),
-    minTon: Number(settings.min_ton || 0.5),
+    minTon: Number(settings.min_ton || 0.2),
     maxTon: Number(settings.max_ton || 50),
     autoConfirmEnabled: settings.auto_confirm_enabled === 'true'
   });

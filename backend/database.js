@@ -166,7 +166,7 @@ async function initDatabase() {
     'cost_prem_12_uzs': '370000',
     'ton_price_uzs': '14000',
     'cost_ton_uzs': '12000',
-    'min_ton': '0.5',
+    'min_ton': '0.2',
     'max_ton': '50',
     'ton_auto_rate_enabled': 'true',
     'ton_provider_spread_pct': '3',
