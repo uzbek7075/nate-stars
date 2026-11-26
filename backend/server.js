@@ -1,4 +1,9 @@
+const dns = require('dns');
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
 require('dotenv').config();
+const https = require('https');
 const express = require('express');
 const cors = require('cors');
 const { Telegraf } = require('telegraf');
@@ -23,7 +28,9 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-const bot = new Telegraf(BOT_TOKEN);
+// Принудительно IPv4 для запросов Telegraf (защита от ETIMEDOUT на облачных хостингах с IPv6 DNS)
+const telegramAgent = new https.Agent({ keepAlive: true, family: 4 });
+const bot = new Telegraf(BOT_TOKEN, { telegram: { agent: telegramAgent } });
 const app = express();
 
 app.use(cors());
@@ -2163,6 +2170,43 @@ let tunnelProc = null;
 let tonMonitorTimer = null;
 let tonRateTimer = null;
 
+async function launchTelegramBotWithRetry(maxAttempts = 6) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const botInfo = await bot.telegram.getMe();
+      bot.botInfo = botInfo;
+      console.log(`🤖 Бот авторизован: @${botInfo.username}`);
+
+      if (WEBAPP_URL && WEBAPP_URL.startsWith('https://')) {
+        try {
+          await bot.telegram.setChatMenuButton({
+            menu_button: {
+              type: 'web_app',
+              text: '⭐ Nate Stars',
+              web_app: { url: WEBAPP_URL }
+            }
+          });
+          console.log('🔘 Кнопка меню в Telegram настроена на:', WEBAPP_URL);
+        } catch (menuErr) {
+          console.warn('⚠️ Ошибка настройки Menu Button:', menuErr.message);
+        }
+      }
+
+      bot.launch();
+      console.log('✅ Бот слушает сообщения!');
+      console.log(`\n🎉 Всё готово! Бот: https://t.me/${botInfo.username}\n`);
+      return botInfo;
+    } catch (err) {
+      console.warn(`⚠️ Попытка запуска Telegram-бота ${attempt}/${maxAttempts} не удалась:`, err.message);
+      if (attempt < maxAttempts) {
+        await new Promise(r => setTimeout(r, 3500));
+      }
+    }
+  }
+  console.error('❌ Не удалось запустить polling Telegram-бота после нескольких попыток (веб-сервер продолжает работу).');
+  return null;
+}
+
 async function start() {
   try {
     await initDatabase();
@@ -2192,32 +2236,13 @@ async function start() {
       }
     }
 
-    const botInfo = await bot.telegram.getMe();
-    bot.botInfo = botInfo;
-    console.log(`🤖 Бот авторизован: @${botInfo.username}`);
-
-    if (WEBAPP_URL && WEBAPP_URL.startsWith('https://')) {
-      try {
-        await bot.telegram.setChatMenuButton({
-          menu_button: {
-            type: 'web_app',
-            text: '⭐ Nate Stars',
-            web_app: { url: WEBAPP_URL }
-          }
-        });
-        console.log('🔘 Кнопка меню в Telegram настроена на:', WEBAPP_URL);
-      } catch (menuErr) {
-        console.warn('⚠️ Ошибка настройки Menu Button:', menuErr.message);
-      }
-    }
-
-    bot.launch();
-    console.log('✅ Бот слушает сообщения!');
-
     // Запускаем облачный слушатель @CardXabarBot (если авторизован)
     CardXabarService.init(handleCardXabarPayment).catch(err => {
       console.warn('⚠️ Ошибка запуска CardXabar:', err.message);
     });
+
+    // Запуск Telegram-бота с автоповтором без блокировки или падения сервера
+    await launchTelegramBotWithRetry(6);
 
     // Мониторинг остатка TON на кошельке Fragment (при старте и каждые 10 минут)
     setTimeout(() => {
@@ -2231,8 +2256,6 @@ async function start() {
     tonRateTimer = setInterval(() => {
       refreshTonRate().catch(err => console.warn('⚠️ Автокурс TON:', err.message));
     }, 5 * 60 * 1000);
-
-    console.log(`\n🎉 Всё готово! Бот: https://t.me/${botInfo.username}\n`);
 
   } catch (err) {
     console.error('❌ Ошибка запуска:', err);
